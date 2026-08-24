@@ -1,0 +1,29 @@
+mncs 0.5;
+
+// Lineage authority-separation negative gate.
+//
+// `certify_claim` derives a verdict only under evaluation authority. The
+// proposer below holds proposal authority and attempts to certify its own
+// candidate's target claim anyway. Validation must reject this module: the
+// call cannot launder the evaluator's authority into the proposer's hands,
+// which is the machine-native form of "proposal authority is not promotion
+// or evaluation authority".
+module lineage.negative.g0_self_certification;
+
+enum Verdict { PASS, FAIL, UNKNOWN }
+
+fn certify_claim(claim_token: i64) -> (result: Verdict)
+    capability evaluation_authority
+    effect certify authorized_by evaluation_authority
+{
+    if claim_token == 0 {
+        return Verdict.UNKNOWN;
+    }
+    return Verdict.PASS;
+}
+
+fn propose_and_self_certify(claim_token: i64) -> (result: Verdict)
+    capability proposal_authority
+{
+    return certify_claim(claim_token);
+}
