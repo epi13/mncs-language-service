@@ -1,0 +1,24 @@
+[package]
+name = "mncs-lsp"
+description = "LSP adapter for the MNCS Language Service. A thin projection of the resident semantic core onto the Language Server Protocol."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mncs-lsp"
+path = "src/main.rs"
+
+[dependencies]
+url = "2"
+mncs-service-core = { path = "../service-core" }
+serde_json.workspace = true
+tokio.workspace = true
+tower-lsp.workspace = true
+
+[dev-dependencies]
+futures = "0.3"
+tower = { version = "0.5", features = ["util"] }
+url = "2"

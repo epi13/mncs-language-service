@@ -35,61 +35,66 @@ Acceptance criteria:
 
 ## Phase 1 — Resident read-only semantic core
 
-**Status: deferred until suitable `mncs-language` APIs stabilize.**
+**Status: implemented / exercised** (`crates/service-core`).
 
-Initial implementation should emphasize observation rather than mutation.
+Implemented against the current `mncs-language` frontend
+(`ReferenceCompiler::front_end`) plus one small upstream addition (the
+authoritative `NameResolutionIndex` recorded during elaboration; see the
+linked upstream PR in README).
 
-Target capabilities:
+Exercised capabilities:
 
-- workspace lifecycle;
-- document tracking;
-- authoritative frontend invocation;
-- versioned analysis snapshots;
-- deterministic source position mapping;
-- semantic identity lookup;
-- symbol/reference/dependency indexing;
-- diagnostics and basic semantic queries;
-- coarse but correct invalidation;
-- cancellation and bounded resource behavior.
+- workspace discovery and document lifecycle, including unsaved editor buffers overriding disk state (`DocumentStore`);
+- authoritative frontend invocation per content change with envelope-identity fingerprints;
+- immutable analysis snapshots binding source identity + workspace generation to frontend artifacts;
+- deterministic byte ↔ line/UTF-16 position mapping (`coords::PositionMap`, unit-tested for multibyte, CRLF, clamping);
+- symbol inventory and reference index joined from AST + name resolutions + elaborated program;
+- function-level call graph derived from authoritative call operations;
+- obligations via `Program::generate_obligations` with preserved status/freshness/fallbacks;
+- structured diagnostics with codes/stages/severities/spans;
+- coarse but correct invalidation: changed documents re-analyze from scratch behind per-document locks; unchanged documents reuse resident snapshots (covered by tests).
 
-The first implementation should prefer semantic correctness and simple invalidation over sophisticated incremental algorithms.
+Not yet implemented: fine-grained incremental invalidation, persistent caches, multi-root workspaces, cancellation tokens (the frontend is fast enough that synchronous bounded work is currently acceptable).
 
 ## Phase 2 — First LSP adapter
 
-**Status: deferred.**
+**Status: implemented / exercised for read features** (`crates/lsp`, binary `mncs-lsp`).
 
-Target capabilities:
+Working, protocol-tested via real JSON-RPC exchanges (`tower-lsp` service driven directly):
 
-- document synchronization;
-- diagnostics;
-- hover;
-- document/workspace symbols;
-- go-to-definition;
-- references;
-- semantic tokens;
-- completion where the authoritative language model can support it safely.
+- initialize/shutdown and workspace-root configuration;
+- full-document sync with open/change/save/close;
+- pushed diagnostics mapped through the shared coordinate layer, preserving codes and structured metadata;
+- hover (signature, contracts, capabilities/effects, obligation summary, identity — identical content to MCP describe);
+- go-to-definition, references (with/without declaration), document highlights;
+- nested document symbols including Profile 0.5 records/fields; workspace symbols across documents;
+- semantic tokens restricted to authoritatively classified identifiers plus keywords/numbers;
+- completion limited to high-confidence contexts (identifier prefixes, nominal-type member namespaces, record fields of typed bindings);
+- folding ranges from the CST.
 
-The adapter should remain thin. Any language understanding discovered to be missing should be pushed into `mncs-language` rather than reimplemented in the LSP layer.
+Deliberately omitted: rename/code actions/refactoring (mutation classes), willSave/waitUntil semantics beyond the required minimum, and any expensive-work trigger from keystrokes.
+
+The adapter is thin (~600 lines): it translates between LSP types and core queries only. Language understanding discovered missing was pushed into `mncs-language` (name resolutions), not implemented here.
 
 ## Phase 3 — First agent/MCP adapter
 
-**Status: deferred.**
+**Status: implemented / experimental-to-exercised** (`crates/mcp`, binary `mncs-mcp`).
 
-Begin with read-only semantic tools over the same resident state.
+Read-only tools over the same resident core, protocol-tested with a real MCP client over an in-memory transport:
 
-Candidate capability families:
+| Tool | Notes |
+| --- | --- |
+| `workspace_status` | root, generation, per-document open/analysis currency/validity/diagnostic counts |
+| `document_diagnostics` | structured items with dual-coordinate ranges and token expectations |
+| `identity_at_position` | explicit declaration-vs-reference roles with resolved targets |
+| `describe_subject` | by identity or position: contracts, effects, capabilities, evidence, obligations, call neighborhood, structural members |
+| `find_definition` / `find_references` | authoritative resolution only |
+| `list_symbols` | document-scoped or workspace-wide with name filter |
+| `semantic_dependencies` | `outgoing`/`incoming` call edges lifted from operation-level graph data |
+| `obligations` | subject-filterable; preserves PASS/FAIL/UNKNOWN + method + freshness + fallback |
+| `context_packet` *(experimental)* | bounded declaration+callee excerpts; `complete=true` only when the outgoing-call closure fit the budget |
 
-- workspace/snapshot status;
-- identity at position;
-- semantic subject description;
-- dependencies and dependents;
-- diagnostics and causal explanation;
-- obligations and evidence;
-- authority/effect closure;
-- impact inspection;
-- compact semantic context assembly.
-
-Exact MCP tool names and schemas should be selected from working experience rather than frozen here.
+Tool results carry structured JSON bound to snapshot identity; failures return explicit structured errors without killing the server. Causal explanation slices and authority/effect closure queries remain future work pending deeper language support.
 
 ## Phase 4 — Candidate analysis and semantic impact
 
@@ -174,6 +179,4 @@ Every phase should preserve:
 
 ## Immediate next action
 
-No large implementation push is recommended yet.
-
-When the current `mncs-language` push settles enough to expose a stable frontend/service-facing seam, the next concrete task should be a narrow design-and-implementation pass for Phase 1 that inventories authoritative reusable APIs, identifies only the minimal missing APIs, and builds the first resident read-only semantic snapshot path without duplicating compiler logic.
+Phase 4 candidate analysis is the natural next step now that baseline snapshots, identity-bound responses, and dependency indexes exist: isolated candidate snapshots re-analyzed by the same frontend, then semantic/authority/obligation deltas computed via `SemanticDiff`/`invalidation_from`. Mutation (Phase 5) remains gated on that foundation.

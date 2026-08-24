@@ -1,0 +1,10 @@
+mncs 0.2;
+
+// Unicode smoke fixture: héllo wörld ✓ 日本語 𝄞
+module examples.unicode;
+
+fn évaluate(valeur: i64) -> (résultat: i64)
+{
+    // comment before return ✓
+    return valeur;
+}

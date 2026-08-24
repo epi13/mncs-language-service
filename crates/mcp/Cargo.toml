@@ -1,0 +1,23 @@
+[package]
+name = "mncs-mcp"
+description = "MCP adapter for the MNCS Language Service. Read-only semantic tools over the resident core for coding agents."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mncs-mcp"
+path = "src/main.rs"
+
+[dependencies]
+mncs-service-core = { path = "../service-core" }
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client"] }

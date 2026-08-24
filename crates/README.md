@@ -1,26 +1,26 @@
-# Future implementation layout
+# Implementation layout
 
-This directory reserves the implementation space for the MNCS Language Service without freezing a crate topology before the service-facing `mncs-language` APIs are ready.
-
-The expected responsibility groups are:
+The first implementation pass established the following crate topology from
+observed dependency boundaries:
 
 ```text
-resident service core
-service query/protocol model
-LSP adapter
-MCP adapter
-future MNCS-native adapter
+crates/
+  service-core/   mncs_service_core — resident semantic core
+  lsp/            mncs-lsp binary   — LSP adapter (tower-lsp)
+  mcp/            mncs-mcp binary   — MCP adapter (rmcp), read-only tools
 ```
 
-These may become separate crates, combined crates, or a different arrangement after the first implementation pass inventories actual dependency boundaries.
+Responsibility rules that must be preserved when extending this layout:
 
-The architectural constraints are more important than crate names:
-
-- protocol adapters depend inward on shared service abstractions;
-- the service depends on authoritative `mncs-language` APIs;
+- protocol adapters depend inward on `mncs-service-core` only;
+- the core depends on authoritative `mncs-language` APIs (`mncs-syntax`,
+  `mncs-compiler`, `mncs-model`) and never on an adapter;
 - `mncs-language` does not depend on this repository;
-- semantic behavior is not duplicated in adapters;
-- protocol wire schemas do not become the canonical internal semantic model by convenience;
-- mutation support is deferred until identity-bound snapshot and candidate analysis are robust.
+- semantic behavior is not duplicated in adapters; shared rendering lives in
+  the core so LSP and MCP present identical content;
+- protocol wire schemas never become the canonical internal model;
+- mutation support stays deferred until identity-bound snapshot and candidate
+  analysis semantics are robust.
 
-Do not add placeholder Rust crates solely to make the repository look implemented. The first crate structure should emerge from a concrete Phase 1 resident-read-only implementation pass.
+Representative MNCS fixtures used by every test level live in
+[`tests/fixtures/`](../tests/fixtures/) at the repository root.

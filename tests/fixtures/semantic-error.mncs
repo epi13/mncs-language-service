@@ -1,0 +1,9 @@
+mncs 0.2;
+
+module examples.invalid;
+
+fn transfer(amount: i64) -> (result: i64)
+    effect write authorized_by ledger_mutation
+{
+    return amount;
+}

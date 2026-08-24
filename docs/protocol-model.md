@@ -16,42 +16,37 @@ The internal query model should be capable of representing exact subject identit
 
 LSP is the compatibility interface for editors and IDEs.
 
-Expected eventual mappings include:
+Implemented mappings (see `crates/lsp`):
 
-- diagnostics;
-- hover;
-- completion;
-- go-to-definition;
-- references;
-- document/workspace symbols;
-- semantic tokens;
-- inlay hints;
-- code actions;
-- rename/refactoring once mutation safety is mature.
+- full-text document sync; pushed diagnostics preserving codes with structured `data` (stage, expected/found tokens);
+- hover rendered from the same core content the MCP describe tool returns;
+- go-to-definition, references, document highlights via authoritative resolution;
+- nested document symbols; workspace symbols; folding ranges from the CST;
+- semantic tokens over a service-owned legend (`module, function, parameter, variable, type, variant, field, keyword, number`) restricted to authoritatively classified identifiers;
+- completion in high-confidence contexts only.
 
-LSP-facing output may be intentionally human-oriented, but richer MNCS metadata should remain available through structured extension fields or companion queries where appropriate.
+Deferred until mutation safety matures: rename, code actions, refactoring.
+Richer MNCS metadata remains available to editor clients through experimental
+`mncs/*` methods declared in the server capabilities.
 
 ## MCP / agent projection
 
-MCP should provide an interoperable agent-facing adapter to the same service.
+MCP provides an interoperable agent-facing adapter to the same service
+(`crates/mcp`). The initial emphasis is read-only semantic inspection.
 
-The initial emphasis should be read-only semantic inspection rather than broad mutation.
+Implemented tools: `workspace_status`, `document_diagnostics`,
+`identity_at_position`, `describe_subject`, `find_definition`,
+`find_references`, `list_symbols`, `semantic_dependencies`, `obligations`, and
+the experimental bounded `context_packet`. See `docs/agent-interface.md` for
+request/response semantics and uncertainty handling.
 
-Potential capability families include:
+Tool responses carry a structured JSON payload alongside a short text summary.
+Every structured payload names its snapshot. Failures are returned as explicit
+structured errors (`is_error` + reason), never as empty successes, and never
+crash the server.
 
-- workspace and snapshot status;
-- identity at source position;
-- describe semantic subject;
-- references, dependencies, and dependents;
-- diagnostics and explanation slices;
-- obligations and evidence state;
-- authority/effect relationships;
-- semantic impact queries;
-- compact task-specific context assembly.
-
-Exact tool names and schemas are intentionally deferred until the underlying language APIs and service query model are sufficiently stable.
-
-MCP must not become the canonical in-process data model merely because it is convenient for early agent integration.
+MCP has not become the canonical in-process data model: the wire schemas are
+derived from the core query types, not the other way around.
 
 ## MNCS-native projection
 
@@ -119,11 +114,13 @@ If a client protocol cannot express a distinction directly, the adapter should c
 
 ## Context delivery for agents
 
-One long-term opportunity is task-specific semantic context generation.
-
-Instead of forcing an agent to repeatedly reread a repository, the service may eventually assemble a bounded context packet around a subject and task, containing only relevant semantic neighbors, dependencies, contracts, authority, obligations, evidence, and source spans.
-
-This is a future capability, not a bootstrap commitment, but it is a major reason to preserve protocol-neutral semantic state from the beginning.
+A first experimental version of bounded context assembly exists:
+`context_packet(uri, identity, max_excerpts)` returns the subject's declaration
+excerpt plus callee excerpts within budget, together with a `complete` flag that
+is true **only** when the whole outgoing-call closure fit inside the budget, and
+`notes` explaining any shortfall. The service claims neither minimality nor
+completeness beyond this check. Task-class-aware selection policies remain
+future work.
 
 ## Mutation boundary
 
