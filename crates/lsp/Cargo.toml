@@ -12,6 +12,8 @@ name = "mncs-lsp"
 path = "src/main.rs"
 
 [dependencies]
+futures = "0.3"
+url = "2"
 mncs-service-core = { path = "../service-core" }
 mncs-syntax.workspace = true
 serde_json.workspace = true
@@ -19,4 +21,6 @@ tokio.workspace = true
 tower-lsp.workspace = true
 
 [dev-dependencies]
-serde = { workspace = true }
+futures = "0.3"
+tower = { version = "0.5", features = ["util"] }
+url = "2"
