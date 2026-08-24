@@ -33,9 +33,12 @@ What works today:
 - semantic tokens, conservative completion, folding ranges;
 - call-graph dependencies/dependents derived from elaborated bodies;
 - obligations with preserved `PASS` / `FAIL` / `UNKNOWN` status;
+- candidate analysis (Phase 4): isolated candidate snapshots with language-owned
+  semantic/obligation deltas and stale-evidence detection (`analyze_candidate`,
+  MCP + native), never mutating the workspace baseline;
 - a read-only MCP tool surface for agents over the same resident state.
 
-What is explicitly not implemented yet: cross-module workspaces (the language itself is single-module today), candidate snapshots and impact deltas (roadmap Phase 4), mutation/semantic patches (Phases 5+), incremental fine-grained invalidation, and any Forge/Fabric/backend integration.
+What is explicitly not implemented yet: cross-module workspaces (the language itself is single-module today), mutation/semantic patches (Phase 5+), incremental fine-grained invalidation, and any Forge/Fabric/backend integration.
 
 See [`ROADMAP.md`](ROADMAP.md) for the authoritative status vocabulary.
 
@@ -150,7 +153,7 @@ or point either server at this repository's own fixtures:
 MNLS_WORKSPACE_ROOT=$PWD/tests/fixtures cargo run -p mncs-lsp
 ```
 
-Note on dependencies: while the upstream name-resolution PR is in review, this workspace pins `mncs-language` crates to its feature branch. After that PR merges, switch the `[workspace.dependencies]` entries to `branch = "main"` (or a released version).
+`mncs-language` is consumed from `main`; the authoritative `NameResolutionIndex` recorded by elaboration and the public `contract_id` constructor are part of main.
 
 ## Core principles
 

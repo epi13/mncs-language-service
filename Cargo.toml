@@ -14,9 +14,9 @@ repository = "https://github.com/epi13/mncs-language-service"
 rust-version = "1.85"
 
 [workspace.dependencies]
-mncs-syntax = { git = "https://github.com/epi13/mncs-language", branch = "feat/name-resolution-index" }
-mncs-model = { git = "https://github.com/epi13/mncs-language", branch = "feat/name-resolution-index" }
-mncs-compiler = { git = "https://github.com/epi13/mncs-language", branch = "feat/name-resolution-index" }
+mncs-syntax = { git = "https://github.com/epi13/mncs-language", branch = "main" }
+mncs-model = { git = "https://github.com/epi13/mncs-language", branch = "main" }
+mncs-compiler = { git = "https://github.com/epi13/mncs-language", branch = "main" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

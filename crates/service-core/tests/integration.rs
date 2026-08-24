@@ -554,3 +554,75 @@ fn context_packet_is_bounded_and_honest_about_completeness() {
     assert!(!packet.excerpts.is_empty());
     assert!(packet.excerpts.len() <= 2, "budget respected");
 }
+
+fn read_fixture(name: &str) -> String {
+    std::fs::read_to_string(fixtures_dir().join(name)).expect("fixture text")
+}
+
+#[test]
+fn candidate_analysis_reports_identity_bound_deltas_without_touching_the_baseline() {
+    let uri = fixture_uri("records.mncs");
+    let baseline_text = read_fixture("records.mncs");
+    let service = service();
+    // Publish the baseline through the ordinary lifecycle.
+    service
+        .did_open(&uri, 1, baseline_text.clone())
+        .expect("open");
+
+    // Candidate: change a function body so its identity fingerprint changes.
+    let candidate_text =
+        baseline_text.replace("return updated.celsius;", "return updated.celsius + 1;");
+    assert_ne!(candidate_text, baseline_text, "fixture must be changeable");
+
+    let response = service
+        .analyze_candidate(&uri, &candidate_text)
+        .expect("candidate analysis");
+    assert_eq!(response.status, ResponseStatus::Answered);
+    assert!(response.changed);
+    assert_ne!(
+        response.baseline_source_identity,
+        response.candidate_source_identity
+    );
+    let semantic = response.semantic.as_ref().expect("both sides elaborate");
+    assert!(
+        !semantic.changed.is_empty() || !semantic.added.is_empty(),
+        "a body change must touch at least one semantic identity: {semantic:#?}"
+    );
+
+    // The workspace baseline is untouched: the resident snapshot still
+    // carries the baseline source identity.
+    let resident = service.snapshot(&uri).expect("resident snapshot");
+    assert_eq!(resident.source_identity, response.baseline_source_identity);
+}
+
+#[test]
+fn candidate_analysis_refuses_stale_and_identical_candidates_fail_closed() {
+    let uri = fixture_uri("records.mncs");
+    let baseline_text = read_fixture("records.mncs");
+    let service = service();
+    service
+        .did_open(&uri, 1, baseline_text.clone())
+        .expect("open");
+
+    let unchanged = service
+        .analyze_candidate(&uri, &baseline_text)
+        .expect("identical");
+    assert!(!unchanged.changed);
+    assert!(unchanged
+        .unresolved
+        .iter()
+        .any(|note| note.contains("identical")));
+
+    // A candidate that does not parse answers with diagnostics only and an
+    // explicit unresolved note instead of guessing.
+    let broken = format!("{}\nfn broken( {{", baseline_text);
+    let response = service
+        .analyze_candidate(&uri, &broken)
+        .expect("broken candidate");
+    assert!(!response.candidate_elaborates);
+    assert!(response.semantic.is_none());
+    assert!(response
+        .unresolved
+        .iter()
+        .any(|note| note.contains("does not elaborate")));
+}

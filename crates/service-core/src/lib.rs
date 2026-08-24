@@ -11,6 +11,7 @@
 //! `mncs-syntax`, `mncs-compiler`, or `mncs-model`.
 
 mod analysis;
+mod candidate;
 mod coords;
 mod document;
 mod error;
@@ -19,6 +20,10 @@ mod queries;
 mod render;
 
 pub use analysis::DocumentAnalysis;
+pub use candidate::{
+    CandidateAnalysisResponse, CandidateObligation, ChangedIdentity, DiagnosticsDelta,
+    ObligationDelta, ObligationStatusChange, SemanticDelta, StaleEvidenceItem,
+};
 pub use coords::{PositionInfo, PositionMap, RangeInfo};
 pub use document::{DocumentStore, MAX_DISCOVERED_DOCUMENTS, MAX_DOCUMENT_BYTES};
 pub use error::ServiceError;
