@@ -464,7 +464,7 @@ impl LanguageService {
         &self.store
     }
 
-    pub fn workspace_root(&self) -> Option<&std::path::Path> {
+    pub fn workspace_root(&self) -> Option<std::path::PathBuf> {
         self.store.workspace_root()
     }
 
@@ -486,6 +486,17 @@ impl LanguageService {
     }
 
     pub fn discover_workspace(&self) -> Result<Vec<String>, ServiceError> {
+        self.store.discover_workspace()
+    }
+
+    /// Attach (or replace) the workspace root after construction and run an
+    /// initial discovery scan. Used by adapters whose protocol supplies the
+    /// root during initialization rather than at process start.
+    pub fn configure_root(
+        &self,
+        root: Option<std::path::PathBuf>,
+    ) -> Result<Vec<String>, ServiceError> {
+        self.store.set_root(root);
         self.store.discover_workspace()
     }
 
@@ -596,10 +607,7 @@ impl LanguageService {
         }
         documents.sort_by(|left, right| left.uri.cmp(&right.uri));
         WorkspaceStatusResponse {
-            workspace_root: self
-                .store
-                .workspace_root()
-                .map(|path| path.display().to_string()),
+            workspace_root: self.store.workspace_root_path(),
             generation: self.store.generation(),
             documents,
         }

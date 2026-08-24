@@ -10,19 +10,17 @@ The initial agent-facing interface is expected to be exposed through MCP for int
 
 The service should answer questions about *meaning, dependency, authority, evidence, and impact* using exact language identities wherever possible.
 
-An agent should eventually be able to ask questions conceptually equivalent to:
+An agent can already ask (tool names as implemented in `crates/mcp`):
 
-- what semantic subject exists at this source position?;
-- describe this exact identity;
-- what does this identity depend on?;
-- what depends on it?;
-- which obligations or evidence would become stale if it changed?;
-- what authority/effects are involved?;
-- explain this diagnostic using the smallest useful causal slice;
-- compare these two semantic snapshots;
-- assemble bounded context for this subject and task.
+- what semantic subject exists at this source position? → `identity_at_position`;
+- describe this exact identity → `describe_subject` (by `identity` or by `uri`+position);
+- what does this identity call? who calls it? → `semantic_dependencies` (`outgoing`/`incoming`);
+- which obligations/evidence state attaches here? → `obligations` (optionally subject-filtered);
+- what authority/effects are involved? → surfaced in `describe_subject`;
+- assemble bounded context for this subject → `context_packet` *(experimental)*;
+- navigation primitives used by the above → `find_definition`, `find_references`, `list_symbols`, `document_diagnostics`, `workspace_status`.
 
-The external tool names are not fixed by this document.
+Snapshot comparison and impact deltas await Phase 4 candidate snapshots; causal diagnostic slices await deeper language support. All tools are read-only and fail closed.
 
 ## Why a resident service matters
 

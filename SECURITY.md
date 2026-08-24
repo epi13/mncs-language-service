@@ -1,6 +1,6 @@
 # Security Policy
 
-The MNCS Language Service is currently an experimental architecture/bootstrap project and is not production-ready.
+The MNCS Language Service has a working read-only core with LSP and MCP adapters but remains experimental and is not production-ready. Both adapters are local stdio servers; no network transports are implemented.
 
 ## Security-sensitive areas
 

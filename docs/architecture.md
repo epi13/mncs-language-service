@@ -200,9 +200,8 @@ Durable analysis, experiment, verification, or promotion artifacts may eventuall
 
 ## Non-goals for the bootstrap phase
 
-This repository should not yet:
+The bootstrap phase did not:
 
-- select a final crate topology;
 - freeze an agent protocol schema;
 - implement an independent parser or semantic model;
 - define final incremental-analysis algorithms;
@@ -212,4 +211,52 @@ This repository should not yet:
 - treat MCP as the canonical internal protocol;
 - trigger distributed execution from ordinary editor events.
 
-The goal of the bootstrap phase is to establish the correct boundary so later implementation pressure does not accidentally collapse these distinctions.
+## Implemented topology (Phase 1–3 vertical slice)
+
+The first implementation pass settled the crate topology from real dependency boundaries:
+
+```text
+crates/
+  service-core/   mncs_service_core
+      coords      byte ↔ line/UTF-16 position mapping (single authority)
+      document    DocumentStore: workspace discovery, open buffers vs disk,
+                  save/close lifecycle, content fingerprints via envelope identity
+      analysis    DocumentAnalysis: immutable snapshot binding source identity +
+                  generation → SourceFrontEndResult + position map + symbol index
+      indexes     SymbolIndex: declarations (AST), references (authoritative
+                  NameResolutionIndex), identities/signatures (elaborated Program)
+      queries     LanguageService: protocol-neutral query layer and response types
+      render      shared hover markdown, semantic-token classification, completion
+
+  lsp/            mncs-lsp binary — tower-lsp projection of the core
+  mcp/            mncs-mcp binary — rmcp projection (read-only tools)
+```
+
+Dependency direction is strictly one-way: adapters → core → `mncs-language`.
+Neither adapter contains language logic; neither protocol's types appear in the
+core. Both binaries embed the same `LanguageService` type; running one process
+per transport is a deployment choice that does not affect the architecture, and
+a resident daemon with multiple client transports remains the long-term target.
+
+### Snapshot model as implemented
+
+```text
+content state ──(SourceEnvelope seal)──▶ mncs:source:artifact:<sha256>
+                     │
+                     ▼
+DocumentAnalysis { source_identity, generation, front_end, positions, symbols }
+```
+
+`snapshot(uri)` fingerprints current content, returns the resident snapshot on
+match, or runs the authoritative frontend once and publishes. A document change
+simply makes the next query produce a new snapshot; stale results are never
+served because fingerprints are checked before every reuse. Analysis happens
+behind a per-document mutex with no global lock held during frontend work.
+
+### Upstream API consumed
+
+One reusable API was added upstream for this slice (see README link): elaboration
+now records every name-binding decision as a `NameResolutionIndex`
+(`use-site span → declaration span`, classified by declaration kind). The index
+is best-effort so partially valid documents stay navigable. The service joins it
+against its declaration inventory; it never re-implements scoping.

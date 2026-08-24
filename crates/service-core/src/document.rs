@@ -70,8 +70,8 @@ impl Generations {
 /// Resident workspace/document state for one service instance.
 #[derive(Debug)]
 pub struct DocumentStore {
-    root: Option<PathBuf>,
     documents: RwLock<BTreeMap<String, Document>>,
+    root: RwLock<Option<PathBuf>>,
     generations: Generations,
     /// Serializes disk scans.
     discovery_lock: Mutex<()>,
@@ -80,15 +80,22 @@ pub struct DocumentStore {
 impl DocumentStore {
     pub fn new(root: Option<PathBuf>) -> Self {
         Self {
-            root,
+            root: RwLock::new(root),
             documents: RwLock::new(BTreeMap::new()),
             generations: Generations::default(),
             discovery_lock: Mutex::new(()),
         }
     }
 
-    pub fn workspace_root(&self) -> Option<&Path> {
-        self.root.as_deref()
+    pub fn workspace_root(&self) -> Option<PathBuf> {
+        self.root.read().ok().and_then(|root| root.clone())
+    }
+
+    /// Replace the workspace root. Existing documents remain known.
+    pub fn set_root(&self, root: Option<PathBuf>) {
+        if let Ok(mut current) = self.root.write() {
+            *current = root;
+        }
     }
 
     pub fn generation(&self) -> u64 {
@@ -108,8 +115,7 @@ impl DocumentStore {
                 reason: "workspace discovery is already running".to_owned(),
             })?;
         let root = self
-            .root
-            .as_ref()
+            .workspace_root()
             .ok_or_else(|| ServiceError::WorkspaceUnavailable {
                 path: "<no workspace root>".to_owned(),
             })?;
@@ -345,6 +351,10 @@ impl DocumentStore {
     }
 
     /// All known document URIs.
+    pub fn workspace_root_path(&self) -> Option<String> {
+        self.workspace_root().map(|path| path.display().to_string())
+    }
+
     pub fn document_uris(&self) -> Vec<String> {
         self.read_documents()
             .map(|documents| documents.keys().cloned().collect())
