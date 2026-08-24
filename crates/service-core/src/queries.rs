@@ -540,7 +540,15 @@ impl LanguageService {
         let text = self.store.content(uri)?;
         let envelope = self.store.envelope(uri, &text);
         let generation = self.store.generation();
-        let analysis = Arc::new(DocumentAnalysis::analyze(uri, envelope, generation));
+        let dependencies = crate::modules::DependencyFingerprints::collect(&self.store, &text);
+        let resolver = crate::modules::StoreResolver::new(&self.store);
+        let analysis = Arc::new(DocumentAnalysis::analyze_with_resolver(
+            uri,
+            envelope,
+            generation,
+            dependencies,
+            &resolver,
+        ));
 
         // Publish only if the document has not changed during analysis.
         let now_fingerprint = self.content_fingerprint(uri)?;
@@ -559,7 +567,23 @@ impl LanguageService {
     fn cached_snapshot(&self, uri: &str, fingerprint: &str) -> Option<Arc<DocumentAnalysis>> {
         let analyses = self.analyses.read().ok()?;
         let slot = analyses.get(uri)?;
-        (slot.snapshot.source_identity == fingerprint).then(|| Arc::clone(&slot.snapshot))
+        if slot.snapshot.source_identity != fingerprint {
+            return None;
+        }
+        // Multi-module staleness: a snapshot is current only when every
+        // direct dependency's identity is still what was recorded. This
+        // keeps importers honest when a dependency edits without the
+        // importer changing.
+        if !slot.snapshot.dependencies.is_empty() {
+            let Ok(text) = self.store.content(uri) else {
+                return None;
+            };
+            let now = crate::modules::DependencyFingerprints::collect(&self.store, &text);
+            if now.modules != slot.snapshot.dependencies.modules {
+                return None;
+            }
+        }
+        Some(Arc::clone(&slot.snapshot))
     }
 
     /// Evict cached analyses whose fingerprints no longer match; called after

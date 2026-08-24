@@ -16,6 +16,7 @@ mod coords;
 mod document;
 mod error;
 mod indexes;
+mod modules;
 mod queries;
 mod render;
 
