@@ -89,6 +89,15 @@ fn default_budget() -> u32 {
     6
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CandidateParams {
+    /// URI of the baseline MNCS source document known to the service.
+    pub uri: String,
+    /// Proposed full document content, analyzed in isolation; the workspace
+    /// baseline is never modified.
+    pub candidate_text: String,
+}
+
 /// The resident MNCS semantic service exposed through MCP.
 #[derive(Clone)]
 pub struct MncsSemanticServer {
@@ -351,6 +360,23 @@ impl MncsSemanticServer {
             .service()
             .context_packet(&uri, &identity, max_excerpts as usize)
         {
+            Ok(response) => Ok(self.answered(serialize(&response))),
+            Err(error) => Ok(self.failed(error.to_string())),
+        }
+    }
+
+    #[tool(
+        description = "Analyze proposed document content as an isolated candidate against the resident baseline without modifying the workspace. Returns identity-bound semantic, obligation, and diagnostics deltas plus language-computed stale evidence."
+    )]
+    async fn analyze_candidate(
+        &self,
+        Parameters(CandidateParams {
+            uri,
+            candidate_text,
+        }): Parameters<CandidateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let uri = self.resolve_uri(&uri);
+        match self.service().analyze_candidate(&uri, &candidate_text) {
             Ok(response) => Ok(self.answered(serialize(&response))),
             Err(error) => Ok(self.failed(error.to_string())),
         }

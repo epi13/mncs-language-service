@@ -438,7 +438,7 @@ struct AnalysisSlot {
 /// derived from it. LSP and MCP adapters embed the same instance type; no
 /// analyzer duplication exists anywhere else in this repository.
 pub struct LanguageService {
-    store: DocumentStore,
+    pub(crate) store: DocumentStore,
     analyses: RwLock<BTreeMap<String, AnalysisSlot>>,
     /// Serializes concurrent analysis of the same document without holding
     /// global locks during expensive frontend work.
@@ -1447,7 +1447,7 @@ pub fn summarize_public(uri: &str, snapshot: &DocumentAnalysis, index: usize) ->
     summarize(uri, snapshot, index)
 }
 
-fn snapshot_info(uri: &str, snapshot: &DocumentAnalysis) -> SnapshotInfo {
+pub(crate) fn snapshot_info(uri: &str, snapshot: &DocumentAnalysis) -> SnapshotInfo {
     SnapshotInfo {
         uri: uri.to_owned(),
         source_identity: snapshot.source_identity.clone(),

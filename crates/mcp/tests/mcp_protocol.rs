@@ -252,3 +252,37 @@ async fn unknown_documents_fail_without_crashing_the_server() {
     let status = call(peer, "workspace_status".to_owned(), serde_json::json!({})).await;
     assert_ne!(status.is_error, Some(true));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn analyze_candidate_returns_deltas_without_mutating_the_workspace() {
+    let harness = spawn_server().await;
+    let peer = &harness.peer;
+    let uri = uri_for("records.mncs");
+    let baseline_text =
+        std::fs::read_to_string(fixtures_dir().join("records.mncs")).expect("fixture text");
+    let candidate_text =
+        baseline_text.replace("return updated.celsius;", "return updated.celsius + 1;");
+    assert_ne!(candidate_text, baseline_text);
+
+    let result = call(
+        peer,
+        "analyze_candidate".to_owned(),
+        serde_json::json!({ "uri": uri, "candidate_text": candidate_text }),
+    )
+    .await;
+    assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
+    let raw = result
+        .structured_content
+        .expect("structured content")
+        .to_string();
+    assert!(raw.contains("baselineSourceIdentity") || raw.contains("baseline_source_identity"));
+    assert!(raw.contains("stale_evidence") || raw.contains("staleEvidence"));
+
+    // The workspace still reports the untouched baseline document.
+    let status = call(peer, "workspace_status".to_owned(), serde_json::json!({})).await;
+    let text = status.content[0].as_text().expect("text").text.clone();
+    assert!(
+        !text.contains("candidate"),
+        "workspace status must not adopt candidate state"
+    );
+}

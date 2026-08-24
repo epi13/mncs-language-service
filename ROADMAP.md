@@ -98,20 +98,33 @@ Tool results carry structured JSON bound to snapshot identity; failures return e
 
 ## Phase 4 — Candidate analysis and semantic impact
 
-**Status: deferred.**
+**Status: implemented / exercised (initial).**
 
-Add isolated candidate snapshots without promoting them to the workspace baseline.
+Isolated candidate snapshots without promoting them to the workspace baseline
+are now implemented in the resident core and exposed over MCP.
 
-Target capabilities:
+Working:
 
-- compare baseline and candidate snapshots;
-- semantic, authority, obligation, and evidence deltas where supported;
-- affected-identity/affected-obligation analysis;
-- stale evidence detection;
-- bounded candidate validation;
-- retained unresolved/unknown state.
+- `LanguageService::analyze_candidate(uri, candidate_text)` analyzes proposed
+  content in isolation; the workspace baseline snapshot is never modified;
+- identity-bound response naming baseline and candidate source identities,
+  with an explicit `changed` marker for identical candidates;
+- language-owned semantic delta via `Program::semantic_diff` (added / removed /
+  changed identities with fingerprints) — no diff semantics are re-implemented
+  here;
+- obligation deltas (added / removed / status-changed) from authoritative
+  obligation generation on both sides, with per-side PASS/FAIL/UNKNOWN counts;
+- stale-evidence detection via `Program::invalidation_from`, the language's
+  own conservative invalidation report;
+- fail-closed behavior: a broken baseline is refused (`unsupported`); a
+  candidate that does not elaborate answers with diagnostics only plus an
+  explicit unresolved note; nothing is promoted or guessed;
+- MCP tool `analyze_candidate(uri, candidate_text)` (read-only).
 
-This phase should establish safe reasoning about proposed changes before enabling semantic mutation.
+Not yet implemented: cross-document candidate workspaces (the language is
+single-module), candidate persistence across restarts, evidence-freshness
+joins against external Forge records, and mutation (Phase 5 remains gated on
+this foundation).
 
 ## Phase 5 — Safe mutation and semantic patches
 
@@ -179,4 +192,10 @@ Every phase should preserve:
 
 ## Immediate next action
 
-Phase 4 candidate analysis is the natural next step now that baseline snapshots, identity-bound responses, and dependency indexes exist: isolated candidate snapshots re-analyzed by the same frontend, then semantic/authority/obligation deltas computed via `SemanticDiff`/`invalidation_from`. Mutation (Phase 5) remains gated on that foundation.
+Phase 4 candidate analysis now has a working identity-bound core exercised by
+the MNCS-native RAVEL workspace (`epi13/RAVEL`, `mncs/workspace`): candidate
+snapshots, semantic deltas, obligation deltas, and language-owned stale-
+evidence detection. The next pressure points are (a) RAVEL-driven use of
+candidate deltas inside its checkpoint flow, (b) multi-root workspaces when
+the language grows beyond one module, and (c) Phase 5 semantic patches, which
+remain gated until candidate snapshots have survived more real use.
