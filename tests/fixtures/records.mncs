@@ -1,0 +1,12 @@
+mncs 0.5;
+
+module examples.records;
+
+record Reading { celsius: i32 }
+
+fn adjust(celsius: i32) -> (result: i32)
+{
+    let base: Reading = Reading { celsius: celsius };
+    let updated: Reading = Reading { ..base, celsius: 21 };
+    return updated.celsius;
+}

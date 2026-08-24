@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/service-core",
+    "crates/lsp",
+    "crates/mcp",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/epi13/mncs-language-service"
+rust-version = "1.85"
+
+[workspace.dependencies]
+mncs-syntax = { git = "https://github.com/epi13/mncs-language", branch = "feat/name-resolution-index" }
+mncs-model = { git = "https://github.com/epi13/mncs-language", branch = "feat/name-resolution-index" }
+mncs-compiler = { git = "https://github.com/epi13/mncs-language", branch = "feat/name-resolution-index" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync", "time"] }
+tower-lsp = "0.20"
+rmcp = { version = "3", features = ["server", "transport-io"] }
+schemars = "1"
+
+[profile.release]
+lto = "thin"

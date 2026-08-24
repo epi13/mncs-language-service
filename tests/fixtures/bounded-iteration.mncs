@@ -1,0 +1,12 @@
+mncs 0.4;
+
+module examples.iteration;
+
+fn retry(input: i64) -> (result: i64)
+    capability checked_integer
+{
+    iterate attempts up_to 4 carrying current: i64 = input {
+        next current = current;
+    }
+    return input;
+}

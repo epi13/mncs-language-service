@@ -1,0 +1,7 @@
+mncs 0.1;
+
+module examples.broken;
+
+fn identity(value: i64) -> (result: i64) {
+    return value
+}

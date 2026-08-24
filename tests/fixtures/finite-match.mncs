@@ -1,0 +1,18 @@
+mncs 0.3;
+
+module examples.finite;
+
+enum Verdict { Pass, Fail, Skip }
+
+fn classify(score: i64) -> (verdict: Verdict)
+{
+    if score >= 50 {
+        return Verdict.Pass;
+    }
+    return Verdict.Fail;
+}
+
+fn label(verdict: Verdict) -> (result: i64)
+{
+    return match verdict { Pass => 1, Fail => 0, Skip => 0 };
+}
