@@ -128,7 +128,13 @@ pub fn expected_scope(kind: TokenKind) -> &'static str {
         | TokenKind::Minus
         | TokenKind::Star
         | TokenKind::Slash
-        | TokenKind::Percent => "keyword.operator.arithmetic.mncs",
+        | TokenKind::Percent
+        | TokenKind::PlusPercent
+        | TokenKind::MinusPercent
+        | TokenKind::StarPercent
+        | TokenKind::PlusPipe
+        | TokenKind::MinusPipe
+        | TokenKind::StarPipe => "keyword.operator.arithmetic.mncs",
         TokenKind::EqEq
         | TokenKind::NotEq
         | TokenKind::Lt

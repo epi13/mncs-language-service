@@ -1,5 +1,6 @@
 //! Module-import support: resolution of `use` declarations against resident
-//! workspace documents, and dependency-aware analysis invalidation.
+//! workspace documents and standard-library roots, plus dependency-aware
+//! analysis invalidation.
 //!
 //! The authoritative semantics remain in mncs-language: this module only
 //! decides *which source* satisfies an imported module name, then hands the
@@ -7,6 +8,7 @@
 //! (`MNE173`) in the importing document.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use mncs_compiler::ModuleResolver;
 use mncs_syntax::SourceEnvelope;
@@ -30,13 +32,62 @@ pub fn declared_module_name(text: &str) -> Option<String> {
     None
 }
 
+/// Candidate file paths for one dotted module name under one root directory,
+/// mirroring the research CLI's discovery layout: full dotted path, then a
+/// version-tail-stripped path (`m.x.v1` -> `m/x.mncs`), then an
+/// `mncs.`-prefix-stripped path (so `mncs.core.status.v1` can live at
+/// `<root>/core/status.mncs`), then the bare final segment. Discovery only;
+/// compatibility is established by elaborating the resolved source.
+fn candidate_paths(root: &std::path::Path, module: &str) -> Vec<PathBuf> {
+    let dotted = module.replace('.', "/");
+    let mut paths = vec![root.join(format!("{dotted}.mncs"))];
+    // `m.x.v1` -> `m/x.mncs`: drop a trailing `.vN` version segment.
+    fn version_stripped(name: &str) -> Option<String> {
+        let (head, last) = name.rsplit_once('.')?;
+        let digits = last.strip_prefix('v')?;
+        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        Some(head.to_owned())
+    }
+    if let Some(head) = version_stripped(module) {
+        paths.push(root.join(format!("{}.mncs", head.replace('.', "/"))));
+    }
+    if let Some(rest) = module.strip_prefix("mncs.") {
+        paths.push(root.join(format!("{}.mncs", rest.replace('.', "/"))));
+        if let Some(rest_head) = version_stripped(rest) {
+            paths.push(root.join(format!("{}.mncs", rest_head.replace('.', "/"))));
+        }
+    }
+    paths.push(root.join(format!(
+        "{}.mncs",
+        module.rsplit('.').next().unwrap_or(module)
+    )));
+    paths
+}
+
+/// Directories that may satisfy `use` targets beyond resident documents,
+/// read once per resolver construction from `MNCS_LIBRARY_PATH`
+/// (`:`-separated). This lets external consumers bind to `mncs.core.*`
+/// without vendoring the standard-library tree into every workspace.
+fn library_roots_from_env() -> Vec<PathBuf> {
+    std::env::var("MNCS_LIBRARY_PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|entry| !entry.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
 /// Resolves imported module names against documents known to the store:
 /// open buffers first (authoritative editor state), then disk content of
-/// registered documents. Names come from each document's `module` declaration.
+/// registered documents, then configured standard-library roots. Names come
+/// from each document's `module` declaration.
 pub struct StoreResolver<'a> {
     store: &'a DocumentStore,
     /// module name -> uri, built once per analysis run.
     index: BTreeMap<String, String>,
+    library_roots: Vec<PathBuf>,
 }
 
 impl<'a> StoreResolver<'a> {
@@ -49,16 +100,40 @@ impl<'a> StoreResolver<'a> {
                 }
             }
         }
-        Self { store, index }
+        Self {
+            store,
+            index,
+            library_roots: library_roots_from_env(),
+        }
     }
 }
 
 impl ModuleResolver for StoreResolver<'_> {
     fn resolve(&self, module: &str) -> Option<SourceEnvelope> {
-        let uri = self.index.get(module)?;
-        let text = self.store.content(uri).ok()?;
-        let text = (*text).clone();
-        Some(self.store.envelope(uri, &text))
+        if !module.is_empty()
+            && module
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_')
+            && !module.starts_with('.')
+            && !module.ends_with('.')
+            && !module.contains("..")
+        {
+            if let Some(uri) = self.index.get(module) {
+                if let Ok(text) = self.store.content(uri) {
+                    let text = (*text).clone();
+                    return Some(self.store.envelope(uri, &text));
+                }
+            }
+            for root in &self.library_roots {
+                for path in candidate_paths(root, module) {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        let uri = format!("file://{}", path.display());
+                        return Some(self.store.envelope(&uri, &text));
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
