@@ -789,7 +789,7 @@
             "name": "keyword.control.iteration.mncs"
         },
         "reserved-keywords-declaration": {
-            "match": "\\b(module|fn|let|enum|record|effect|capability)\\b",
+            "match": "\\b(module|use|fn|let|enum|record|effect|capability)\\b",
             "name": "keyword.declaration.mncs"
         },
         "reserved-keywords-misc": {

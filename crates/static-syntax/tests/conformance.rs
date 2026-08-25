@@ -28,6 +28,7 @@ use mncs_syntax::{SourceArtifactKind, SourceEnvelope, TokenKind};
 const PROBE: &str = r#"mncs 0.5;
 // line comment with -> => == != <= >= symbols inside
 /* block /* nested */ comment still open */ module probe.everything;
+use lib.evidence;
 record Pair { left: i64, right: bool }
 enum Verdict { PASS, FAIL, UNKNOWN }
 fn probe(alpha: i64, beta: bool) -> (result: i64)

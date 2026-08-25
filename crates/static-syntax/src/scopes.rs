@@ -34,6 +34,7 @@ pub const KEYWORD_SPELLINGS: &[(&str, TokenKind)] = &[
     ("capability", TokenKind::CapabilityKeyword),
     ("authorized_by", TokenKind::AuthorizedKeyword),
     ("enum", TokenKind::EnumKeyword),
+    ("use", TokenKind::UseKeyword),
     ("record", TokenKind::RecordKeyword),
     ("match", TokenKind::MatchKeyword),
     ("iterate", TokenKind::IterateKeyword),
@@ -66,6 +67,7 @@ pub fn is_keyword_kind(kind: TokenKind) -> bool {
             | TokenKind::CapabilityKeyword
             | TokenKind::AuthorizedKeyword
             | TokenKind::EnumKeyword
+            | TokenKind::UseKeyword
             | TokenKind::RecordKeyword
             | TokenKind::MatchKeyword
             | TokenKind::IterateKeyword
@@ -107,6 +109,7 @@ pub fn expected_scope(kind: TokenKind) -> &'static str {
         TokenKind::CapabilityKeyword => "keyword.declaration.capability.mncs",
         TokenKind::AuthorizedKeyword => "keyword.control.authorized-by.mncs",
         TokenKind::EnumKeyword => "keyword.declaration.enum.mncs",
+        TokenKind::UseKeyword => "keyword.declaration.mncs",
         TokenKind::RecordKeyword => "keyword.declaration.record.mncs",
         TokenKind::MatchKeyword => "keyword.control.flow.match.mncs",
         TokenKind::IterateKeyword => "keyword.control.iteration.iterate.mncs",

@@ -1,0 +1,13 @@
+mncs 0.6;
+
+module fixtures.imports.evidence;
+
+enum Verdict { PASS, FAIL, UNKNOWN }
+
+fn demote(value: Verdict) -> (result: Verdict) {
+    return match value {
+        PASS => Verdict.UNKNOWN,
+        FAIL => Verdict.FAIL,
+        UNKNOWN => Verdict.UNKNOWN,
+    };
+}

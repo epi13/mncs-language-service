@@ -1,0 +1,9 @@
+mncs 0.6;
+
+module fixtures.imports.study;
+
+use fixtures.imports.evidence;
+
+fn soften(value: Verdict) -> (result: Verdict) {
+    return demote(value);
+}
