@@ -5,9 +5,12 @@ observed dependency boundaries:
 
 ```text
 crates/
-  service-core/   mncs_service_core — resident semantic core
-  lsp/            mncs-lsp binary   — LSP adapter (tower-lsp)
-  mcp/            mncs-mcp binary   — MCP adapter (rmcp), read-only tools
+  service-core/    mncs_service_core — resident semantic core
+  static-syntax/   mncs-static-syntax — TextMate grammar package: structural
+                   validation, a TextMate-subset tokenization engine for tests,
+                   and live conformance against the mncs-language lexer
+  lsp/             mncs-lsp binary   — LSP adapter (tower-lsp)
+  mcp/             mncs-mcp binary   — MCP adapter (rmcp), read-only tools
 ```
 
 Responsibility rules that must be preserved when extending this layout:
@@ -20,7 +23,10 @@ Responsibility rules that must be preserved when extending this layout:
   the core so LSP and MCP present identical content;
 - protocol wire schemas never become the canonical internal model;
 - mutation support stays deferred until identity-bound snapshot and candidate
-  analysis semantics are robust.
+  analysis semantics are robust;
+- `mncs-static-syntax` is presentation-only: it may consume the authoritative
+  lexer for conformance checking, but never defines or reclassifies MNCS
+  syntax on its own authority.
 
 Representative MNCS fixtures used by every test level live in
 [`tests/fixtures/`](../tests/fixtures/) at the repository root.

@@ -126,6 +126,31 @@ single-module), candidate persistence across restarts, evidence-freshness
 joins against external Forge records, and mutation (Phase 5 remains gated on
 this foundation).
 
+## Phase 4.5 — Static syntax and GitHub/Linguist readiness
+
+**Status: implemented / exercised (integration prepared; upstream acceptance pending).**
+
+A static presentation layer for environments that cannot run the MNCS
+compiler, kept strictly subordinate to the authoritative language:
+
+- canonical TextMate grammar `source.mncs` covering the current Profile
+  0.1–0.5 surface (`integration/static-syntax/mncs.tmLanguage.json`);
+- grammar structural validation plus a TextMate-subset tokenization engine
+  and real-document highlighting tests (`crates/static-syntax`);
+- mechanical drift protection against the authoritative lexer: exhaustive
+  `TokenKind` mapping (compile-time tripwire), live bidirectional
+  conformance tests, manifest count invariant, weekly CI drift watch;
+- prepared Linguist language definition, curated licensed sample corpus with
+  provenance, upstream PR runbook, and a reproducible validation script that
+  exercises a local linguist checkout end to end;
+- honest adoption measurement tooling: as of 2026-08, `.mncs` usage (~76
+  known public files, one owner) is far below Linguist's ≥2000-file bar, so
+  **no upstream PR is submitted yet**.
+
+Details: [`docs/github-language-support.md`](docs/github-language-support.md).
+The LSP semantic-token path remains the richer authoritative alternative;
+the static grammar never encodes semantics.
+
 ## Phase 5 — Safe mutation and semantic patches
 
 **Status: deferred.**
@@ -195,7 +220,8 @@ Every phase should preserve:
 Phase 4 candidate analysis now has a working identity-bound core exercised by
 the MNCS-native RAVEL workspace (`epi13/RAVEL`, `mncs/workspace`): candidate
 snapshots, semantic deltas, obligation deltas, and language-owned stale-
-evidence detection. The next pressure points are (a) RAVEL-driven use of
-candidate deltas inside its checkpoint flow, (b) multi-root workspaces when
+evidence detection. Phase 4.5 has the GitHub/Linguist integration prepared
+and gated on real adoption. The next pressure points are (a) RAVEL-driven use
+of candidate deltas inside its checkpoint flow, (b) multi-root workspaces when
 the language grows beyond one module, and (c) Phase 5 semantic patches, which
 remain gated until candidate snapshots have survived more real use.

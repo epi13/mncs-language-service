@@ -1,0 +1,65 @@
+mncs 0.4;
+module examples.cre3;
+
+enum Evidence { PASS, FAIL, UNKNOWN }
+enum Attempt { FIRST, SECOND, THIRD, FOURTH }
+enum RetryResult { PASS_FIRST, PASS_SECOND, PASS_THIRD, TERMINAL_FAIL, UNKNOWN_EXHAUSTED, EXCEEDED_BOUND }
+
+fn advance(attempt: Attempt) -> (result: Attempt) {
+    return match attempt {
+        FIRST => Attempt.SECOND,
+        SECOND => Attempt.THIRD,
+        THIRD => Attempt.FOURTH,
+        FOURTH => Attempt.FOURTH,
+    };
+}
+
+fn observe(attempt: Attempt, first: Evidence, second: Evidence, third: Evidence) -> (result: Evidence)
+    capability retry_authority
+    effect observe authorized_by retry_authority
+{
+    return match attempt {
+        FIRST => first,
+        SECOND => second,
+        THIRD => third,
+        FOURTH => third,
+    };
+}
+
+fn successful(attempt: Attempt) -> (result: RetryResult) {
+    return match attempt {
+        FIRST => RetryResult.PASS_FIRST,
+        SECOND => RetryResult.PASS_SECOND,
+        THIRD => RetryResult.PASS_THIRD,
+        FOURTH => RetryResult.EXCEEDED_BOUND,
+    };
+}
+
+fn candidate(first: Evidence, second: Evidence, third: Evidence) -> (result: RetryResult)
+    capability retry_authority
+    effect observe authorized_by retry_authority
+{
+    iterate retries up_to 3 carrying attempt: Attempt = Attempt.FIRST {
+        let outcome: Evidence = observe(attempt, first, second, third);
+        let uncertain: bool = match outcome {
+            PASS => false,
+            FAIL => false,
+            UNKNOWN => true,
+        };
+        if uncertain {
+        } else {
+            let failed: bool = match outcome {
+                PASS => false,
+                FAIL => true,
+                UNKNOWN => false,
+            };
+            if failed {
+                return RetryResult.TERMINAL_FAIL;
+            } else {
+            }
+            return successful(attempt);
+        }
+        next attempt = advance(attempt);
+    }
+    return RetryResult.UNKNOWN_EXHAUSTED;
+}

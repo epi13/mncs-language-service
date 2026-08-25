@@ -1,0 +1,240 @@
+mncs 0.5;
+
+// MNCS Lineage — deterministic synthetic succession experiment G0 -> G1.
+//
+// Topology under evaluation:
+//
+//     G0 (active parent)
+//     |\
+//     | C1  protected-property regression        -> REJECTED
+//     | C2  identity-bearing dependency changed  -> UNKNOWN (stale evidence)
+//      \ C3  all hard claims pass, rollback ready -> PROMOTED -> G1
+//
+// Every decision below is a pure function of explicit verdict, identity, and
+// authority inputs, so the whole experiment replays deterministically from a
+// corpus on any conforming backend. The vocabulary mirrors lineage.core.v1;
+// it is restated here because source modules cannot import other modules yet.
+module lineage.synthetic.g0.v1;
+
+enum Verdict { PASS, FAIL, UNKNOWN }
+
+enum UnknownReason {
+    NONE,
+    STALE_EVIDENCE,
+    MISSING_VERIFIER,
+    BUDGET_EXHAUSTED,
+    UNSUPPORTED_TARGET,
+    CONTAMINATED_PARTITION,
+    DEPENDENCY_CHANGED,
+    INSUFFICIENT_EVIDENCE,
+}
+
+record ClaimVerdict { status: Verdict, reason: UnknownReason }
+
+enum Disposition { PROMOTE, REJECT, HOLD_UNKNOWN }
+
+enum RollbackState { READY, ARTIFACT_MISSING, ROLLBACK_TEST_FAILED }
+
+enum CandidateSlot { NO_CANDIDATE, C1, C2, C3 }
+
+// ---------------------------------------------------------------------------
+// Derived candidate identity
+//
+// A candidate identity is the canonical tuple of its identity-bearing
+// dependency tokens: parent generation, succession contract, inheritance
+// manifest, and development recipe. Freshness is structural equality over the
+// tuple — every token participates, so changing any one dependency changes
+// the identity and invalidates evidence bound to the old one. Authoritative
+// SHA-256 content identities remain an artifact-layer concern; inside the
+// language this makes the identity-dependency rule executable without
+// trusting unchecked arithmetic.
+// ---------------------------------------------------------------------------
+
+fn dependencies_unchanged(
+    parent_frozen: i64,
+    parent_current: i64,
+    contract_frozen: i64,
+    contract_current: i64,
+    inheritance_frozen: i64,
+    inheritance_current: i64,
+    development_recipe_frozen: i64,
+    development_recipe_current: i64,
+) -> (unchanged: bool)
+    requires frozen_candidate_dependencies_recorded
+    ensures changed_dependency_forces_reevaluation
+    ensures frozen_candidate_is_stable_when_dependencies_agree
+{
+    if parent_frozen == parent_current {
+        if contract_frozen == contract_current {
+            if inheritance_frozen == inheritance_current {
+                if development_recipe_frozen == development_recipe_current {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Recorded evidence may only be used while the frozen identity still matches
+// the freshly derived one. A moved dependency downgrades any recorded verdict
+// to UNKNOWN: stale evidence can never silently certify a new artifact.
+fn effective_verdict(recorded: Verdict, dependencies_unchanged: bool) -> (result: Verdict)
+    ensures changed_dependency_forces_reevaluation
+{
+    if dependencies_unchanged {
+        return recorded;
+    }
+    return Verdict.UNKNOWN;
+}
+
+fn staleness_reason(dependencies_unchanged: bool) -> (reason: UnknownReason)
+    ensures unknown_reasons_are_structured
+{
+    if dependencies_unchanged {
+        return UnknownReason.NONE;
+    }
+    return UnknownReason.DEPENDENCY_CHANGED;
+}
+
+// ---------------------------------------------------------------------------
+// Authority separation
+//
+// Proposal authority is not promotion authority. The promoting principal must
+// be independent of both the proposal path and the evidence path; violations
+// block succession outright instead of being forgiven by good scores.
+// ---------------------------------------------------------------------------
+
+fn promotion_authority_independent(
+    promoter_also_proposed: bool,
+    promoter_also_certified: bool,
+) -> (independent: bool)
+    ensures proposal_authority_is_not_promotion_authority
+{
+    if promoter_also_proposed {
+        return false;
+    }
+    if promoter_also_certified {
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Succession decisions
+// ---------------------------------------------------------------------------
+
+// Promotion eligibility for one candidate. Fail-closed ordering: FAIL
+// dominates UNKNOWN, which dominates the rollback gate; only a candidate with
+// every hard claim PASS and a usable rollback point can be promoted.
+fn candidate_disposition(
+    target: Verdict,
+    protected_regression: Verdict,
+    authority_delta: Verdict,
+    rollback: RollbackState,
+) -> (decision: Disposition)
+    requires all_hard_claims_declared
+    ensures protected_regression_blocks_promotion
+    ensures unknown_blocks_promotion
+{
+    let target_failed: bool = match target {
+        FAIL => true,
+        PASS => false,
+        UNKNOWN => false,
+    };
+    let protected_failed: bool = match protected_regression {
+        FAIL => true,
+        PASS => false,
+        UNKNOWN => false,
+    };
+    let authority_failed: bool = match authority_delta {
+        FAIL => true,
+        PASS => false,
+        UNKNOWN => false,
+    };
+    if target_failed {
+        return Disposition.REJECT;
+    }
+    if protected_failed {
+        return Disposition.REJECT;
+    }
+    if authority_failed {
+        return Disposition.REJECT;
+    }
+    let target_uncertain: bool = match target {
+        UNKNOWN => true,
+        PASS => false,
+        FAIL => false,
+    };
+    let protected_uncertain: bool = match protected_regression {
+        UNKNOWN => true,
+        PASS => false,
+        FAIL => false,
+    };
+    let authority_uncertain: bool = match authority_delta {
+        UNKNOWN => true,
+        PASS => false,
+        FAIL => false,
+    };
+    if target_uncertain {
+        return Disposition.HOLD_UNKNOWN;
+    }
+    if protected_uncertain {
+        return Disposition.HOLD_UNKNOWN;
+    }
+    if authority_uncertain {
+        return Disposition.HOLD_UNKNOWN;
+    }
+    return match rollback {
+        READY => Disposition.PROMOTE,
+        ARTIFACT_MISSING => Disposition.REJECT,
+        ROLLBACK_TEST_FAILED => Disposition.REJECT,
+    };
+}
+
+// Selection policy for the branching G0 population: scan C1, C2, C3 in order
+// and admit the first promotion-eligible candidate; retain every rejected or
+// held sibling in the record. A non-independent promotion authority admits
+// nobody.
+fn select_successor(
+    c1: Disposition,
+    c2: Disposition,
+    c3: Disposition,
+    promoter_independent: bool,
+) -> (successor: CandidateSlot)
+    ensures selection_policy_is_deterministic
+{
+    let c1_promotable: bool = match c1 {
+        PROMOTE => true,
+        REJECT => false,
+        HOLD_UNKNOWN => false,
+    };
+    let c2_promotable: bool = match c2 {
+        PROMOTE => true,
+        REJECT => false,
+        HOLD_UNKNOWN => false,
+    };
+    let c3_promotable: bool = match c3 {
+        PROMOTE => true,
+        REJECT => false,
+        HOLD_UNKNOWN => false,
+    };
+    if c1_promotable {
+        if promoter_independent {
+            return CandidateSlot.C1;
+        }
+        return CandidateSlot.NO_CANDIDATE;
+    }
+    if c2_promotable {
+        if promoter_independent {
+            return CandidateSlot.C2;
+        }
+        return CandidateSlot.NO_CANDIDATE;
+    }
+    if c3_promotable {
+        if promoter_independent {
+            return CandidateSlot.C3;
+        }
+    }
+    return CandidateSlot.NO_CANDIDATE;
+}
