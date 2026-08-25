@@ -1,0 +1,22 @@
+# MNCS language definition for github-linguist/linguist `lib/linguist/languages.yml`.
+#
+# Prepared against upstream `main` as of 2026-08-25 (schema fields verified:
+# every current entry carries `type`, `tm_scope`, `ace_mode`; `language_id`
+# is generated exclusively by `script/update-ids` and must stay omitted).
+#
+# Insertion: entries in `languages.yml` are alphabetized case-sensitively;
+# verified against upstream `main` on 2026-08-25, `MNCS` sorts between
+# `MLIR` and `MQL4`. The validation workflow
+# (`integration/github-linguist/validate_linguist.sh`) performs this insert
+# mechanically into a local Linguist checkout.
+#
+# `color`: teal, provisional — see PR-CHECKLIST.md before submitting.
+MNCS:
+  type: programming
+  color: '#0e7c7b'
+  aliases:
+  - mncs
+  extensions:
+  - .mncs
+  tm_scope: source.mncs
+  ace_mode: text

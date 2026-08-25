@@ -1,0 +1,847 @@
+{
+    "name": "MNCS",
+    "version": "1.0.0",
+    "scopeName": "source.mncs",
+    "fileTypes": [
+        "mncs"
+    ],
+    "firstLineMatch": "^\\s*mncs\\s+\\d+\\.\\d+\\s*;",
+    "patterns": [
+        {
+            "include": "#line-comment"
+        },
+        {
+            "include": "#block-comment"
+        },
+        {
+            "include": "#header"
+        },
+        {
+            "include": "#module-declaration"
+        },
+        {
+            "include": "#enum-declaration"
+        },
+        {
+            "include": "#record-declaration"
+        },
+        {
+            "include": "#function-signature"
+        },
+        {
+            "include": "#statements-and-expressions"
+        }
+    ],
+    "repository": {
+        "line-comment": {
+            "name": "comment.line.double-slash.mncs",
+            "match": "(//)[^\\n]*",
+            "captures": {
+                "1": {
+                    "name": "punctuation.definition.comment.mncs"
+                }
+            }
+        },
+        "block-comment": {
+            "name": "comment.block.mncs",
+            "begin": "/\\*",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.begin.mncs"
+                }
+            },
+            "end": "\\*/",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.end.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#block-comment-2"
+                }
+            ],
+            "contentName": "comment.block.mncs"
+        },
+        "block-comment-2": {
+            "name": "comment.block.mncs",
+            "begin": "/\\*",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.begin.mncs"
+                }
+            },
+            "end": "\\*/",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.end.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#block-comment-3"
+                }
+            ],
+            "contentName": "comment.block.mncs"
+        },
+        "block-comment-3": {
+            "name": "comment.block.mncs",
+            "begin": "/\\*",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.begin.mncs"
+                }
+            },
+            "end": "\\*/",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.end.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#block-comment-4"
+                }
+            ],
+            "contentName": "comment.block.mncs"
+        },
+        "block-comment-4": {
+            "name": "comment.block.mncs",
+            "begin": "/\\*",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.begin.mncs"
+                }
+            },
+            "end": "\\*/",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.end.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#block-comment-5"
+                }
+            ],
+            "contentName": "comment.block.mncs"
+        },
+        "block-comment-5": {
+            "name": "comment.block.mncs",
+            "begin": "/\\*",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.begin.mncs"
+                }
+            },
+            "end": "\\*/",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.end.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#block-comment-6"
+                }
+            ],
+            "contentName": "comment.block.mncs"
+        },
+        "block-comment-6": {
+            "name": "comment.block.mncs",
+            "begin": "/\\*",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.begin.mncs"
+                }
+            },
+            "end": "\\*/",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.end.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#block-comment-7"
+                }
+            ],
+            "contentName": "comment.block.mncs"
+        },
+        "block-comment-7": {
+            "name": "comment.block.mncs",
+            "begin": "/\\*",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.begin.mncs"
+                }
+            },
+            "end": "\\*/",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.end.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#block-comment-8"
+                }
+            ],
+            "contentName": "comment.block.mncs"
+        },
+        "block-comment-8": {
+            "name": "comment.block.mncs",
+            "begin": "/\\*",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.begin.mncs"
+                }
+            },
+            "end": "\\*/",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.comment.end.mncs"
+                }
+            },
+            "patterns": [],
+            "contentName": "comment.block.mncs"
+        },
+        "header": {
+            "match": "^\\s*(mncs)(\\s+)(\\d[\\d.]*\\.?[\\d.]*)",
+            "captures": {
+                "1": {
+                    "name": "keyword.other.header.mncs"
+                },
+                "3": {
+                    "name": "constant.numeric.version.mncs"
+                }
+            }
+        },
+        "module-declaration": {
+            "match": "\\b(module)\\s+((?:mncs|[_\\p{L}][_\\p{L}\\p{N}]*)(?:\\.(?:mncs|[_\\p{L}][_\\p{L}\\p{N}]*))*)",
+            "captures": {
+                "1": {
+                    "name": "keyword.declaration.module.mncs"
+                },
+                "2": {
+                    "name": "entity.name.namespace.mncs"
+                }
+            }
+        },
+        "enum-declaration": {
+            "begin": "\\b(enum)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(\\{)",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.declaration.enum.mncs"
+                },
+                "2": {
+                    "name": "entity.name.enum.mncs"
+                },
+                "3": {
+                    "name": "punctuation.section.block.begin.mncs"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.block.end.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#line-comment"
+                },
+                {
+                    "include": "#block-comment"
+                },
+                {
+                    "match": "[_\\p{L}][_\\p{L}\\p{N}]*",
+                    "name": "entity.name.variant.mncs"
+                },
+                {
+                    "match": ",",
+                    "name": "punctuation.separator.comma.mncs"
+                }
+            ]
+        },
+        "record-declaration": {
+            "begin": "\\b(record)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(\\{)",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.declaration.record.mncs"
+                },
+                "2": {
+                    "name": "entity.name.record.mncs"
+                },
+                "3": {
+                    "name": "punctuation.section.block.begin.mncs"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.block.end.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#line-comment"
+                },
+                {
+                    "include": "#block-comment"
+                },
+                {
+                    "match": "([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(:)\\s*([_\\p{L}][_\\p{L}\\p{N}]*)",
+                    "captures": {
+                        "1": {
+                            "name": "variable.other.member.mncs"
+                        },
+                        "2": {
+                            "name": "punctuation.separator.colon.mncs"
+                        },
+                        "3": {
+                            "name": "entity.name.type.mncs"
+                        }
+                    }
+                },
+                {
+                    "match": ",",
+                    "name": "punctuation.separator.comma.mncs"
+                }
+            ]
+        },
+        "function-signature": {
+            "begin": "\\b(fn)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.declaration.function.mncs"
+                },
+                "2": {
+                    "name": "entity.name.function.mncs"
+                }
+            },
+            "end": "\\{",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.block.begin.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#line-comment"
+                },
+                {
+                    "include": "#block-comment"
+                },
+                {
+                    "include": "#effect-declaration"
+                },
+                {
+                    "include": "#contract-requires"
+                },
+                {
+                    "include": "#contract-ensures"
+                },
+                {
+                    "include": "#contract-assumes"
+                },
+                {
+                    "include": "#capability-declaration"
+                },
+                {
+                    "match": "->",
+                    "name": "keyword.operator.arrow.mncs"
+                },
+                {
+                    "match": "([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(:)\\s*([_\\p{L}][_\\p{L}\\p{N}]*)",
+                    "captures": {
+                        "1": {
+                            "name": "variable.parameter.mncs"
+                        },
+                        "2": {
+                            "name": "punctuation.separator.colon.mncs"
+                        },
+                        "3": {
+                            "name": "entity.name.type.mncs"
+                        }
+                    }
+                },
+                {
+                    "match": "\\(",
+                    "name": "punctuation.section.parentheses.begin.mncs"
+                },
+                {
+                    "match": "\\)",
+                    "name": "punctuation.section.parentheses.end.mncs"
+                },
+                {
+                    "match": ",",
+                    "name": "punctuation.separator.comma.mncs"
+                }
+            ]
+        },
+        "statements-and-expressions": {
+            "patterns": [
+                {
+                    "include": "#line-comment"
+                },
+                {
+                    "include": "#block-comment"
+                },
+                {
+                    "include": "#iteration-header"
+                },
+                {
+                    "include": "#statement-let"
+                },
+                {
+                    "include": "#effect-declaration"
+                },
+                {
+                    "include": "#contract-requires"
+                },
+                {
+                    "include": "#contract-ensures"
+                },
+                {
+                    "include": "#contract-assumes"
+                },
+                {
+                    "include": "#capability-declaration"
+                },
+                {
+                    "include": "#record-literal"
+                },
+                {
+                    "include": "#boolean-literal"
+                },
+                {
+                    "include": "#match-arm"
+                },
+                {
+                    "include": "#statement-next"
+                },
+                {
+                    "include": "#statement-if"
+                },
+                {
+                    "include": "#statement-else"
+                },
+                {
+                    "include": "#statement-return"
+                },
+                {
+                    "include": "#statement-fail"
+                },
+                {
+                    "include": "#statement-match"
+                },
+                {
+                    "include": "#statement-while"
+                },
+                {
+                    "include": "#numeric-version"
+                },
+                {
+                    "include": "#numeric-integer"
+                },
+                {
+                    "include": "#function-call"
+                },
+                {
+                    "include": "#operator-spread"
+                },
+                {
+                    "include": "#member-access"
+                },
+                {
+                    "include": "#operator-arrows"
+                },
+                {
+                    "include": "#operator-comparison"
+                },
+                {
+                    "include": "#operator-assignment"
+                },
+                {
+                    "include": "#operator-arithmetic"
+                },
+                {
+                    "include": "#reserved-keywords-control"
+                },
+                {
+                    "include": "#reserved-keywords-iteration"
+                },
+                {
+                    "include": "#reserved-keywords-declaration"
+                },
+                {
+                    "include": "#reserved-keywords-misc"
+                },
+                {
+                    "include": "#punctuation-colon"
+                },
+                {
+                    "include": "#punctuation-semicolon"
+                },
+                {
+                    "include": "#punctuation-comma"
+                },
+                {
+                    "include": "#punctuation-paren-open"
+                },
+                {
+                    "include": "#punctuation-paren-close"
+                },
+                {
+                    "include": "#punctuation-brace-close"
+                },
+                {
+                    "include": "#punctuation-stray-dot"
+                },
+                {
+                    "include": "#block-body"
+                }
+            ]
+        },
+        "iteration-header": {
+            "match": "\\b(iterate)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)\\s+(up_to)\\s+(\\d+)\\s*(carrying)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(:)\\s*([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(=)",
+            "captures": {
+                "1": {
+                    "name": "keyword.control.iteration.iterate.mncs"
+                },
+                "2": {
+                    "name": "variable.name.mncs"
+                },
+                "3": {
+                    "name": "keyword.control.iteration.up-to.mncs"
+                },
+                "4": {
+                    "name": "constant.numeric.integer.mncs"
+                },
+                "5": {
+                    "name": "keyword.control.iteration.carrying.mncs"
+                },
+                "6": {
+                    "name": "variable.name.mncs"
+                },
+                "7": {
+                    "name": "punctuation.separator.colon.mncs"
+                },
+                "8": {
+                    "name": "entity.name.type.mncs"
+                },
+                "9": {
+                    "name": "keyword.operator.assignment.mncs"
+                }
+            }
+        },
+        "statement-let": {
+            "match": "\\b(let)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(:)\\s*([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(=)",
+            "captures": {
+                "1": {
+                    "name": "keyword.declaration.variable.mncs"
+                },
+                "2": {
+                    "name": "variable.name.mncs"
+                },
+                "3": {
+                    "name": "punctuation.separator.colon.mncs"
+                },
+                "4": {
+                    "name": "entity.name.type.mncs"
+                },
+                "5": {
+                    "name": "keyword.operator.assignment.mncs"
+                }
+            }
+        },
+        "contract-requires": {
+            "match": "\\b(requires)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)",
+            "captures": {
+                "1": {
+                    "name": "keyword.control.contract.requires.mncs"
+                },
+                "2": {
+                    "name": "entity.name.contract.mncs"
+                }
+            }
+        },
+        "contract-ensures": {
+            "match": "\\b(ensures)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)",
+            "captures": {
+                "1": {
+                    "name": "keyword.control.contract.ensures.mncs"
+                },
+                "2": {
+                    "name": "entity.name.contract.mncs"
+                }
+            }
+        },
+        "contract-assumes": {
+            "match": "\\b(assumes)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)",
+            "captures": {
+                "1": {
+                    "name": "keyword.control.contract.assumes.mncs"
+                },
+                "2": {
+                    "name": "entity.name.contract.mncs"
+                }
+            }
+        },
+        "capability-declaration": {
+            "match": "\\b(capability)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)",
+            "captures": {
+                "1": {
+                    "name": "keyword.declaration.capability.mncs"
+                },
+                "2": {
+                    "name": "entity.name.capability.mncs"
+                }
+            }
+        },
+        "effect-declaration": {
+            "match": "\\b(effect)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)\\s+(authorized_by)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)",
+            "captures": {
+                "1": {
+                    "name": "keyword.declaration.effect.mncs"
+                },
+                "2": {
+                    "name": "entity.name.effect.mncs"
+                },
+                "3": {
+                    "name": "keyword.control.authorized-by.mncs"
+                },
+                "4": {
+                    "name": "entity.name.capability.mncs"
+                }
+            }
+        },
+        "record-literal": {
+            "begin": "\\b([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(\\{)(?=\\s*(?:\\.\\.|[_\\p{L}][_\\p{L}\\p{N}]*\\s*:))",
+            "beginCaptures": {
+                "1": {
+                    "name": "entity.name.type.mncs"
+                },
+                "2": {
+                    "name": "punctuation.section.block.begin.mncs"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.block.end.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#line-comment"
+                },
+                {
+                    "include": "#block-comment"
+                },
+                {
+                    "include": "#operator-spread"
+                },
+                {
+                    "match": "([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(:)",
+                    "captures": {
+                        "1": {
+                            "name": "variable.other.member.mncs"
+                        },
+                        "2": {
+                            "name": "punctuation.separator.colon.mncs"
+                        }
+                    }
+                },
+                {
+                    "include": "#boolean-literal"
+                },
+                {
+                    "include": "#numeric-version"
+                },
+                {
+                    "include": "#numeric-integer"
+                },
+                {
+                    "include": "#function-call"
+                },
+                {
+                    "include": "#member-access"
+                },
+                {
+                    "include": "#operator-arrows"
+                },
+                {
+                    "include": "#operator-comparison"
+                },
+                {
+                    "include": "#operator-assignment"
+                },
+                {
+                    "include": "#operator-arithmetic"
+                },
+                {
+                    "match": ",",
+                    "name": "punctuation.separator.comma.mncs"
+                },
+                {
+                    "include": "#statements-and-expressions"
+                }
+            ]
+        },
+        "match-arm": {
+            "match": "\\b([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(=>)",
+            "captures": {
+                "1": {
+                    "name": "entity.name.variant.mncs"
+                },
+                "2": {
+                    "name": "keyword.operator.arrow.mncs"
+                }
+            }
+        },
+        "statement-next": {
+            "match": "\\b(next)\\b",
+            "name": "keyword.control.flow.next.mncs"
+        },
+        "statement-if": {
+            "match": "\\bif\\b",
+            "name": "keyword.control.flow.if.mncs"
+        },
+        "statement-else": {
+            "match": "\\belse\\b",
+            "name": "keyword.control.flow.else.mncs"
+        },
+        "statement-return": {
+            "match": "\\breturn\\b",
+            "name": "keyword.control.flow.return.mncs"
+        },
+        "statement-fail": {
+            "match": "\\bfail\\b",
+            "name": "keyword.control.flow.fail.mncs"
+        },
+        "statement-match": {
+            "match": "\\bmatch\\b",
+            "name": "keyword.control.flow.match.mncs"
+        },
+        "statement-while": {
+            "match": "\\bwhile\\b",
+            "name": "keyword.control.flow.while.mncs"
+        },
+        "boolean-literal": {
+            "match": "\\b(true|false)\\b",
+            "name": "constant.language.boolean.mncs"
+        },
+        "numeric-version": {
+            "match": "\\d[\\d.]*\\.[\\d.]*",
+            "name": "constant.numeric.version.mncs"
+        },
+        "numeric-integer": {
+            "match": "\\d+",
+            "name": "constant.numeric.integer.mncs"
+        },
+        "function-call": {
+            "match": "\\b([_\\p{L}][_\\p{L}\\p{N}]*)(?=\\s*\\()",
+            "captures": {
+                "1": {
+                    "name": "variable.function.mncs"
+                }
+            }
+        },
+        "member-access": {
+            "match": "(\\.)\\s*([_\\p{L}][_\\p{L}\\p{N}]*)",
+            "captures": {
+                "1": {
+                    "name": "punctuation.accessor.dot.mncs"
+                },
+                "2": {
+                    "name": "variable.other.property.mncs"
+                }
+            }
+        },
+        "operator-arrows": {
+            "match": "(->|=>)",
+            "name": "keyword.operator.arrow.mncs"
+        },
+        "operator-comparison": {
+            "match": "(==|!=|<=|>=|<|>)",
+            "name": "keyword.operator.comparison.mncs"
+        },
+        "operator-spread": {
+            "match": "\\.\\.",
+            "name": "keyword.operator.spread.mncs"
+        },
+        "operator-assignment": {
+            "match": "=",
+            "name": "keyword.operator.assignment.mncs"
+        },
+        "operator-arithmetic": {
+            "match": "[*+-]",
+            "name": "keyword.operator.arithmetic.mncs"
+        },
+        "reserved-keywords-control": {
+            "match": "\\b(if|else|return|fail|match|while|next)\\b",
+            "name": "keyword.control.flow.mncs"
+        },
+        "reserved-keywords-iteration": {
+            "match": "\\b(iterate|up_to|carrying)\\b",
+            "name": "keyword.control.iteration.mncs"
+        },
+        "reserved-keywords-declaration": {
+            "match": "\\b(module|use|fn|let|enum|record|effect|capability)\\b",
+            "name": "keyword.declaration.mncs"
+        },
+        "reserved-keywords-misc": {
+            "match": "\\b(mncs|authorized_by|requires|ensures|assumes)\\b",
+            "name": "keyword.other.mncs"
+        },
+        "punctuation-colon": {
+            "match": ":",
+            "name": "punctuation.separator.colon.mncs"
+        },
+        "punctuation-semicolon": {
+            "match": ";",
+            "name": "punctuation.terminator.statement.mncs"
+        },
+        "punctuation-comma": {
+            "match": ",",
+            "name": "punctuation.separator.comma.mncs"
+        },
+        "punctuation-paren-open": {
+            "match": "\\(",
+            "name": "punctuation.section.parentheses.begin.mncs"
+        },
+        "punctuation-paren-close": {
+            "match": "\\)",
+            "name": "punctuation.section.parentheses.end.mncs"
+        },
+        "punctuation-brace-close": {
+            "match": "\\}",
+            "name": "punctuation.section.block.end.mncs"
+        },
+        "punctuation-stray-dot": {
+            "match": "\\.",
+            "name": "punctuation.accessor.dot.mncs"
+        },
+        "block-body": {
+            "begin": "\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.section.block.begin.mncs"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.block.end.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#statements-and-expressions"
+                }
+            ]
+        }
+    }
+}

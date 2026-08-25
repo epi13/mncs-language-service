@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/service-core",
+    "crates/static-syntax",
     "crates/lsp",
     "crates/mcp",
 ]
@@ -14,9 +15,10 @@ repository = "https://github.com/epi13/mncs-language-service"
 rust-version = "1.85"
 
 [workspace.dependencies]
-mncs-syntax = { git = "https://github.com/epi13/mncs-language", branch = "mnel-recon/main-repair" }
-mncs-model = { git = "https://github.com/epi13/mncs-language", branch = "mnel-recon/main-repair" }
-mncs-compiler = { git = "https://github.com/epi13/mncs-language", branch = "mnel-recon/main-repair" }
+mncs-syntax = { git = "https://github.com/epi13/mncs-language", branch = "main" }
+mncs-model = { git = "https://github.com/epi13/mncs-language", branch = "main" }
+mncs-compiler = { git = "https://github.com/epi13/mncs-language", branch = "main" }
+fancy-regex = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

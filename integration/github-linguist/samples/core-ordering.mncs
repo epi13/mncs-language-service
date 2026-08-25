@@ -1,0 +1,64 @@
+mncs 0.5;
+
+// mncs.core.ordering — comparison-based selection over signed integers.
+//
+// min, max, and clamp are defined by comparisons only. No arithmetic occurs in
+// this module, so it carries no integer-overflow obligation and its bounded
+// behavior can be decided PASS end to end rather than UNKNOWN.
+//
+// Clamping is total: a value below the (inclusive) lower bound maps to the
+// bound, a value above the upper bound maps to the bound, and every other
+// value maps to itself. The bound relationship `lo <= hi` is a documented
+// precondition of clamp; callers that cannot establish it must not call.
+// (Contract clauses are not used here because current profiles cannot yet
+// discharge contract-evidence obligations from source; declaring one would
+// leave the module permanently UNKNOWN for reasons no corpus can resolve.)
+module mncs.core.ordering.v1;
+
+fn min_i64(a: i64, b: i64) -> (result: i64) {
+    if a <= b {
+        return a;
+    }
+    return b;
+}
+
+fn max_i64(a: i64, b: i64) -> (result: i64) {
+    if a >= b {
+        return a;
+    }
+    return b;
+}
+
+fn clamp_i64(value: i64, lo: i64, hi: i64) -> (result: i64) {
+    if value < lo {
+        return lo;
+    }
+    if value > hi {
+        return hi;
+    }
+    return value;
+}
+
+fn min_i32(a: i32, b: i32) -> (result: i32) {
+    if a <= b {
+        return a;
+    }
+    return b;
+}
+
+fn max_i32(a: i32, b: i32) -> (result: i32) {
+    if a >= b {
+        return a;
+    }
+    return b;
+}
+
+fn clamp_i32(value: i32, lo: i32, hi: i32) -> (result: i32) {
+    if value < lo {
+        return lo;
+    }
+    if value > hi {
+        return hi;
+    }
+    return value;
+}

@@ -1,0 +1,74 @@
+mncs 0.5;
+
+// mncs.core.status — authoritative MNCS status/evidence-dominance lattice.
+//
+// This module is the standard-library definition of the three-valued status
+// domain used by reconstruction programs (RAVEL reasoning cores, MNEL learning
+// spines). It is deliberately tiny, total, and effect-free.
+//
+// Dominance: FAIL dominates UNKNOWN dominates PASS. Combining evidence can
+// only weaken a claim: no operation in this module can turn UNKNOWN into PASS
+// or delete FAIL. There is intentionally no function here that maps UNKNOWN to
+// PASS under any input.
+//
+// Until module linking lands (RFC 0014), consumers bind to this module by
+// identity-bound differential agreement: their local helpers must agree with
+// these operations over the bounded corpora under examples/library-core.
+module mncs.core.status.v1;
+
+enum Status { PASS, FAIL, UNKNOWN }
+
+record StatusPair { left: Status, right: Status }
+
+// Lattice join. Total over the 3x3 finite domain.
+fn dominate(left: Status, right: Status) -> (result: Status) {
+    return match left {
+        PASS => right,
+        FAIL => Status.FAIL,
+        UNKNOWN => match right {
+            PASS => Status.UNKNOWN,
+            FAIL => Status.FAIL,
+            UNKNOWN => Status.UNKNOWN,
+        },
+    };
+}
+
+// Join of a pair record; the canonical two-element evidence combination.
+// Wrapping the arguments in one record keeps call sites canonical when the
+// combined evidence itself is carried across functions as a value.
+fn combine(pair: StatusPair) -> (result: Status) {
+    return dominate(pair.left, pair.right);
+}
+
+// A decided status is settled truth: PASS or FAIL. UNKNOWN is undecided by
+// definition and must stay visible wherever it arises; deciding it here would
+// be authority laundering.
+fn is_decided(subject: Status) -> (result: bool) {
+    return match subject {
+        PASS => true,
+        FAIL => true,
+        UNKNOWN => false,
+    };
+}
+
+// Dominance test without materializing a join result: `left` dominates
+// `right` exactly when joining them yields `left`.
+fn dominates(left: Status, right: Status) -> (result: bool) {
+    return match dominate(left, right) {
+        PASS => match left {
+            PASS => true,
+            FAIL => false,
+            UNKNOWN => false,
+        },
+        FAIL => match left {
+            FAIL => true,
+            PASS => false,
+            UNKNOWN => false,
+        },
+        UNKNOWN => match left {
+            UNKNOWN => true,
+            PASS => false,
+            FAIL => false,
+        },
+    };
+}

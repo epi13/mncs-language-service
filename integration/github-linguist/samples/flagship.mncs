@@ -1,0 +1,15 @@
+mncs 0.2;
+
+// Flagship Source Profile 0.2 fixture: bindings, contracts, capabilities, branch, failure.
+module examples.flagship;
+
+fn bounded_step(n: i64, limit: i64) -> (result: i64)
+    requires n_within_limit
+    capability checked_integer
+{
+    if n > limit {
+        fail isolated;
+    }
+    let next: i64 = n + 1;
+    return next;
+}

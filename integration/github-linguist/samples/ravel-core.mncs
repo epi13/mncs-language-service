@@ -1,0 +1,80 @@
+mncs 0.5;
+
+// MNCS-native RAVEL core: the status lattice, evidence combination, and
+// candidate disposition. This module is a direct logical reconstruction of
+// RAVEL's authority boundary: RAVEL may combine and interpret bounded
+// evidence, but it can never convert UNKNOWN into PASS, never delete FAIL,
+// and never certify its own candidates.
+//
+// Identities are opaque i64 digest halves. Host boundaries bind them to full
+// content identities; inside RAVEL reasoning they are ordered, comparable,
+// and never re-derived from text.
+module ravel.core.v1;
+
+enum Status { PASS, FAIL, UNKNOWN }
+
+enum Disposition { COMMIT, REJECT, HOLD }
+
+record EvidenceRef {
+    obligation: i64,
+    verifier: i64,
+    status: Status,
+}
+
+record GateSet { a: Status, b: Status, c: Status, d: Status }
+
+// Lattice join of evidence status under MNCS dominance:
+// FAIL dominates UNKNOWN dominates PASS.
+fn dominate(left: Status, right: Status) -> (result: Status) {
+    return match left {
+        PASS => right,
+        FAIL => Status.FAIL,
+        UNKNOWN => match right {
+            PASS => Status.UNKNOWN,
+            FAIL => Status.FAIL,
+            UNKNOWN => Status.UNKNOWN,
+        },
+    };
+}
+
+fn combine_evidence(left: EvidenceRef, right: EvidenceRef) -> (result: Status) {
+    return dominate(left.status, right.status);
+}
+
+// A candidate may commit only when every hard gate is PASS. Any FAIL is a
+// rejection; any unresolved gate holds the candidate. UNKNOWN is preserved,
+// never promoted.
+fn disposition(gates: GateSet) -> (result: Disposition) {
+    let ab: Status = dominate(gates.a, gates.b);
+    let abc: Status = dominate(ab, gates.c);
+    let combined: Status = dominate(abc, gates.d);
+    return match combined {
+        PASS => Disposition.COMMIT,
+        FAIL => Disposition.REJECT,
+        UNKNOWN => Disposition.HOLD,
+    };
+}
+
+// Advisory confidence may rank work but never changes governing status.
+// Enumerated status is discriminated by exhaustive match, never by equality
+// operators; finite variants have ordinal identity, not comparison operators.
+fn status_failed(subject: Status) -> (result: bool) {
+    return match subject {
+        PASS => false,
+        FAIL => true,
+        UNKNOWN => false,
+    };
+}
+
+fn confidence_ranked(confidence_a: i64, confidence_b: i64, status_a: Status, status_b: Status) -> (result: i64) {
+    if status_failed(status_a) {
+        return confidence_b;
+    }
+    if status_failed(status_b) {
+        return confidence_a;
+    }
+    if confidence_a >= confidence_b {
+        return confidence_a;
+    }
+    return confidence_b;
+}

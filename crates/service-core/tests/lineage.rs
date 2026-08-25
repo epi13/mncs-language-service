@@ -35,7 +35,9 @@ fn lineage_module_parses_cleanly_and_indexes_vocabulary() {
     let svc = service();
     open(&svc, G0);
 
-    let diagnostics = svc.document_diagnostics(&fixture_uri(G0)).expect("diagnostics");
+    let diagnostics = svc
+        .document_diagnostics(&fixture_uri(G0))
+        .expect("diagnostics");
     assert!(
         diagnostics.items.is_empty(),
         "lineage module should be valid: {:?}",
@@ -44,8 +46,7 @@ fn lineage_module_parses_cleanly_and_indexes_vocabulary() {
 
     let symbols = svc.document_symbols(&fixture_uri(G0)).expect("symbols");
     let mut names: Vec<String> = Vec::new();
-    let mut stack: Vec<&mncs_service_core::DocumentSymbolNode> =
-        symbols.symbols.iter().collect();
+    let mut stack: Vec<&mncs_service_core::DocumentSymbolNode> = symbols.symbols.iter().collect();
     while let Some(node) = stack.pop() {
         names.push(node.summary.name.clone());
         for child in &node.children {
@@ -83,9 +84,7 @@ fn hover_and_definition_survive_lineage_enums() {
     let start = text.find(needle).expect("downgrade return present");
     let offset = start + needle.rfind("UNKNOWN").unwrap();
     let line = text[..offset].matches('\n').count() as u32;
-    let line_start = text[..offset]
-        .rfind('\n')
-        .map_or(0, |index| index + 1);
+    let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
     let character = (offset - line_start) as u32;
 
     let subjects = svc
@@ -103,7 +102,9 @@ fn hover_and_definition_survive_lineage_enums() {
         "expected the UNKNOWN variant as subject"
     );
 
-    let definition = svc.definition(&fixture_uri(G0), line, character).expect("definition");
+    let definition = svc
+        .definition(&fixture_uri(G0), line, character)
+        .expect("definition");
     assert!(
         !definition.definitions.is_empty(),
         "variant usage should resolve to its declaration"
@@ -162,7 +163,9 @@ fn self_certification_fixture_reports_elaboration_error_not_silence() {
 fn obligations_query_preserves_unknown_statuses_for_lineage_contracts() {
     let svc = service();
     open(&svc, G0);
-    let obligations = svc.obligations(&fixture_uri(G0), None).expect("obligations");
+    let obligations = svc
+        .obligations(&fixture_uri(G0), None)
+        .expect("obligations");
     assert!(!obligations.obligations.is_empty());
     // The raw source has no bound evidence yet, so contract-evidence
     // obligations are UNKNOWN; the service must report them verbatim instead

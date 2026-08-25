@@ -36,7 +36,13 @@ What works today:
 - candidate analysis (Phase 4): isolated candidate snapshots with language-owned
   semantic/obligation deltas and stale-evidence detection (`analyze_candidate`,
   MCP + native), never mutating the workspace baseline;
-- a read-only MCP tool surface for agents over the same resident state.
+- a read-only MCP tool surface for agents over the same resident state;
+- **static syntax + GitHub/Linguist readiness (Phase 4.5)**: a production
+  TextMate grammar (`source.mncs`) with mechanical drift protection against
+  the authoritative lexer, plus prepared Linguist language metadata, licensed
+  samples, validation tooling, and an honest adoption measurement. GitHub does
+  not yet recognize MNCS — upstream acceptance is pending real-world usage
+  ([details](docs/github-language-support.md)).
 
 What is explicitly not implemented yet: cross-module workspaces (the language itself is single-module today), mutation/semantic patches (Phase 5+), incremental fine-grained invalidation, and any Forge/Fabric/backend integration.
 
@@ -86,6 +92,9 @@ LSP and MCP are adapters over one shared resident core. Neither protocol defines
 - symbol, dependency, and reference indexes derived from authoritative artifacts;
 - semantic query infrastructure;
 - protocol adaptation for editors and agents;
+- static (TextMate) syntax presentation and third-party forge integration
+  assets, as shallow presentation adapters over the authoritative language
+  ([`integration/`](integration/README.md));
 - interaction policy around stale snapshots and candidate changes;
 - service observability and lifecycle.
 
@@ -96,8 +105,12 @@ A language semantic capability required by the service is added to `mncs-languag
 ```text
 crates/
   service-core/     resident core (documents, snapshots, indexes, queries)
+  static-syntax/    TextMate grammar validation, tokenization tests,
+                    and live conformance against the mncs-language lexer
   lsp/              LSP adapter binary (tower-lsp)
   mcp/              MCP adapter binary (rmcp), read-only tools
+integration/        third-party integration assets (TextMate grammar package,
+                    GitHub/Linguist readiness kit) — see integration/README.md
 tests/fixtures/     representative MNCS sources shared by all test levels
 docs/               architecture, protocol model, agent interface, trust boundary
 ```

@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly drift watch: rerun conformance against latest upstream main.
+    - cron: "0 6 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build --workspace
+      - name: Workspace tests (includes static-syntax tokenization + live lexer conformance)
+        run: cargo test --workspace
+
+  integration-assets:
+    name: Grammar & Linguist assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Grammar JSON parses with canonical identity and resolved includes
+        run: |
+          python3 - <<'PY'
+          import json
+          g = json.load(open("integration/static-syntax/mncs.tmLanguage.json"))
+          assert g["scopeName"] == "source.mncs", g["scopeName"]
+          assert g["fileTypes"] == ["mncs"], g["fileTypes"]
+          names = set(g["repository"])
+
+          def resolve(patterns):
+              for entry in patterns:
+                  if "include" in entry:
+                      target = entry["include"].lstrip("#")
+                      assert target in names, f"unresolved include {entry['include']}"
+                  elif "begin" in entry:
+                      resolve(entry.get("patterns", []))
+
+          resolve(g["patterns"])
+          print(f"grammar OK ({len(names)} repository rules)")
+          PY
+      - name: Linguist language fragment is well-formed with required fields
+        run: |
+          python3 - <<'PY'
+          import yaml
+          frag = yaml.safe_load(open("integration/github-linguist/languages.yml.fragment"))
+          assert list(frag) == ["MNCS"], frag.keys()
+          e = frag["MNCS"]
+          for field, want in [("type", "programming"), ("tm_scope", "source.mncs"),
+                              ("ace_mode", "text"), ("extensions", [".mncs"]),
+                              ("aliases", ["mncs"])]:
+              assert e[field] == want, (field, e[field])
+          assert "language_id" not in e, "language_id must come from script/update-ids"
+          color = e["color"]
+          assert color.startswith("#") and len(color) == 7, color
+          print("fragment OK:", e)
+          PY
+      - name: Samples exist and provenance covers them all
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          d = pathlib.Path("integration/github-linguist/samples")
+          samples = sorted(p.name for p in d.glob("*.mncs"))
+          assert samples, "no curated samples"
+          prov = (d / "PROVENANCE.md").read_text()
+          missing = [s for s in samples if f"`{s}`" not in prov]
+          assert not missing, f"PROVENANCE.md does not cover: {missing}"
+          for s in samples:
+              text = (d / s).read_text()
+              assert text.lstrip().startswith("mncs 0."), f"{s} lacks an MNCS header"
+          print(f"samples OK ({len(samples)} files, provenance complete)")
+          PY
+
+  drift-watch:
+    name: Upstream syntax drift watch (weekly)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Refresh authoritative-language dependency to latest mncs-language main
+        run: |
+          cargo update mncs-syntax || cargo update --workspace
+      - name: Conformance against freshest upstream lexer
+        run: cargo test -p mncs-static-syntax

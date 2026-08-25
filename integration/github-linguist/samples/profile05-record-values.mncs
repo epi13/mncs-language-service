@@ -1,0 +1,15 @@
+mncs 0.5;
+
+// Source Profile 0.5 positive fixture: logical record values are constructed,
+// functionally updated, and projected within a single realization unit.
+// Record identity is canonical (fields sorted by name); no physical layout
+// participates in the meaning of the value.
+module examples.profile05_record_values;
+
+record Reading { celsius: i32, milli: i32 }
+
+fn main(celsius: i32) -> (result: i32) {
+    let base: Reading = Reading { celsius: celsius, milli: 3 };
+    let updated: Reading = Reading { ..base, milli: 21 };
+    return updated.celsius + updated.milli * 2;
+}
