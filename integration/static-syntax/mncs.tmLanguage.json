@@ -467,6 +467,9 @@
                     "include": "#operator-arithmetic"
                 },
                 {
+                    "include": "#operator-logical"
+                },
+                {
                     "include": "#reserved-keywords-control"
                 },
                 {
@@ -682,6 +685,9 @@
                     "include": "#operator-arithmetic"
                 },
                 {
+                    "include": "#operator-logical"
+                },
+                {
                     "match": ",",
                     "name": "punctuation.separator.comma.mncs"
                 },
@@ -777,8 +783,12 @@
             "name": "keyword.operator.assignment.mncs"
         },
         "operator-arithmetic": {
-            "match": "[*+-]",
+            "match": "[*/%+-]",
             "name": "keyword.operator.arithmetic.mncs"
+        },
+        "operator-logical": {
+            "match": "(&&|\\|\\|)",
+            "name": "keyword.operator.logical.mncs"
         },
         "reserved-keywords-control": {
             "match": "\\b(if|else|return|fail|match|while|next)\\b",

@@ -5,7 +5,9 @@
 //! exact sequences an editor performs: initialize, open, receive diagnostics,
 //! hover, definition, references, unsaved change, updated diagnostics, close.
 
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
+use std::process::{Child, ChildStdout, Command, Stdio};
 
 use futures::StreamExt;
 fn offset_position(text: &str, needle: &str, plus_chars: usize) -> Position {
@@ -366,4 +368,119 @@ async fn workspace_symbol_query_finds_across_documents() {
     let rendered = serde_json::to_string(&value).expect("string");
     assert!(rendered.contains("Reading"));
     assert!(rendered.contains("records.mncs"));
+}
+
+struct StdioClient {
+    child: Child,
+    stdin: std::process::ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl StdioClient {
+    fn start() -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_mncs-lsp"))
+            .env("MNLS_WORKSPACE_ROOT", fixtures_dir())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn stdio server");
+        let stdin = child.stdin.take().expect("server stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("server stdout"));
+        Self {
+            child,
+            stdin,
+            stdout,
+        }
+    }
+
+    fn send(&mut self, method: &str, params: Option<serde_json::Value>, id: Option<u64>) {
+        let mut request = serde_json::json!({ "jsonrpc": "2.0", "method": method });
+        if let Some(params) = params {
+            request["params"] = params;
+        }
+        if let Some(id) = id {
+            request["id"] = serde_json::json!(id);
+        }
+        let body = serde_json::to_vec(&request).expect("request JSON");
+        write!(self.stdin, "Content-Length: {}\r\n\r\n", body.len()).expect("headers");
+        self.stdin.write_all(&body).expect("request body");
+        self.stdin.flush().expect("flush request");
+    }
+
+    fn receive(&mut self) -> serde_json::Value {
+        let mut headers = Vec::new();
+        loop {
+            let mut line = String::new();
+            self.stdout.read_line(&mut line).expect("response headers");
+            if line == "\r\n" {
+                break;
+            }
+            headers.push(line);
+        }
+        let length = headers
+            .iter()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .expect("content length");
+        let mut body = vec![0; length];
+        self.stdout.read_exact(&mut body).expect("response body");
+        serde_json::from_slice(&body).expect("response JSON")
+    }
+
+    fn receive_until_id(&mut self, id: u64) -> serde_json::Value {
+        loop {
+            let message = self.receive();
+            if message.get("id") == Some(&serde_json::json!(id)) {
+                return message;
+            }
+        }
+    }
+}
+
+impl Drop for StdioClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn real_stdio_transport_publishes_diagnostics() {
+    let mut client = StdioClient::start();
+    let root = fixture_uri_as_root();
+    client.send(
+        "initialize",
+        Some(serde_json::json!({ "processId": std::process::id(), "rootUri": root, "capabilities": {} })),
+        Some(1),
+    );
+    let initialize = client.receive_until_id(1);
+    assert_eq!(
+        initialize["result"]["serverInfo"]["name"],
+        "mncs-language-service"
+    );
+    client.send("initialized", Some(serde_json::json!({})), None);
+
+    let uri = fixture_uri("syntax-error.mncs");
+    let text = std::fs::read_to_string(fixtures_dir().join("syntax-error.mncs")).expect("fixture");
+    client.send(
+        "textDocument/didOpen",
+        Some(serde_json::json!({ "textDocument": { "uri": uri, "languageId": "mncs", "version": 1, "text": text } })),
+        None,
+    );
+    loop {
+        let message = client.receive();
+        if message["method"] == "textDocument/publishDiagnostics" {
+            assert_eq!(message["params"]["uri"], uri);
+            assert!(!message["params"]["diagnostics"]
+                .as_array()
+                .expect("diagnostics")
+                .is_empty());
+            break;
+        }
+    }
+
+    client.send("shutdown", None, Some(2));
+    assert!(client.receive_until_id(2)["error"].is_null());
+    client.send("exit", None, None);
 }

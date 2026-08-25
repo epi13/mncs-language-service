@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use mncs_syntax::{SourceArtifactKind, SourceEnvelope, SourceOrigin, SourceOriginKind};
+use url::Url;
 
 use crate::error::ServiceError;
 
@@ -371,7 +372,9 @@ impl DocumentStore {
     /// Build the authoritative source envelope for the document's current
     /// content. The envelope identity doubles as the content fingerprint.
     pub fn envelope(&self, uri: &str, text: &str) -> SourceEnvelope {
-        let origin_kind = if uri.starts_with("untitled:") || !Path::new(uri).is_absolute() {
+        let origin_kind = if uri.starts_with("untitled:")
+            || (!uri.starts_with("file:") && !Path::new(uri).is_absolute())
+        {
             SourceOriginKind::Inline
         } else {
             SourceOriginKind::Uri
@@ -409,16 +412,13 @@ impl DocumentStore {
 }
 
 pub(crate) fn path_to_uri(path: &Path) -> String {
-    format!("file://{}", path.display())
+    Url::from_file_path(path)
+        .expect("filesystem paths must convert to file URIs")
+        .to_string()
 }
 
 fn path_from_uri(uri: &str) -> Option<PathBuf> {
-    let stripped = uri.strip_prefix("file://")?;
-    if stripped.starts_with('/') {
-        Some(PathBuf::from(stripped))
-    } else {
-        None
-    }
+    Url::parse(uri).ok()?.to_file_path().ok()
 }
 
 #[cfg(test)]
@@ -518,5 +518,21 @@ mod tests {
             error,
             crate::ServiceError::DocumentNotFound { .. }
         ));
+    }
+
+    #[test]
+    fn file_uris_round_trip_percent_encoded_paths() {
+        let dir = tempdir("uri").join("space and unicode");
+        fs::create_dir_all(&dir).expect("create nested directory");
+        let file = dir.join("café.mncs");
+        fs::write(&file, "mncs 0.2;\n").expect("write fixture");
+
+        let uri = super::path_to_uri(&file);
+        assert!(uri.contains("%20"), "URI should encode spaces: {uri}");
+        let store = DocumentStore::new(Some(dir));
+        assert_eq!(
+            (*store.content(&uri).expect("encoded URI loads")).clone(),
+            "mncs 0.2;\n"
+        );
     }
 }

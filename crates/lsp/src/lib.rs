@@ -376,7 +376,10 @@ impl LanguageServer for Backend {
                 response
                     .hits
                     .iter()
-                    .map(|hit| Location::new(uri.clone(), Self::to_range(hit.range)))
+                    .map(|hit| {
+                        let hit_uri = Uri::parse(&hit.uri).unwrap_or_else(|_| uri.clone());
+                        Location::new(hit_uri, Self::to_range(hit.range))
+                    })
                     .collect(),
             )),
             Ok(response) => {
