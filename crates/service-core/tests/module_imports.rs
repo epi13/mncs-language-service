@@ -58,6 +58,45 @@ fn imported_modules_link_and_report_diagnostics_across_documents() {
     );
 }
 
+#[test]
+fn imported_symbols_navigate_to_the_declaring_document() {
+    let svc = LanguageService::new(Some(imports_dir()));
+    svc.discover_workspace().expect("discovery");
+    let study_uri = uri("study.mncs");
+    let study = svc.snapshot(&study_uri).expect("study snapshot");
+    let offset = study.text().find("demote").expect("imported call");
+    let position = study.positions.position_of(study.text(), offset);
+
+    let definitions = svc
+        .definition(&study_uri, position.line, position.character)
+        .expect("definition");
+    assert_eq!(definitions.definitions.len(), 1);
+    assert!(definitions.definitions[0]
+        .uri
+        .as_deref()
+        .is_some_and(|uri| uri.ends_with("evidence.mncs")));
+
+    let hover = svc
+        .hover(&study_uri, position.line, position.character)
+        .expect("hover");
+    assert!(hover
+        .markdown
+        .as_deref()
+        .is_some_and(|markdown| markdown.contains("demote")));
+
+    let references = svc
+        .references(&study_uri, position.line, position.character, true)
+        .expect("references");
+    assert!(references
+        .hits
+        .iter()
+        .any(|hit| hit.is_declaration && hit.uri.ends_with("evidence.mncs")));
+    assert!(references
+        .hits
+        .iter()
+        .any(|hit| !hit.is_declaration && hit.uri.ends_with("study.mncs")));
+}
+
 struct ArcSnapshot(std::sync::Arc<mncs_service_core::DocumentAnalysis>);
 
 impl ArcSnapshot {

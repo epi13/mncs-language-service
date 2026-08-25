@@ -164,6 +164,8 @@ pub struct ReferencesResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReferenceHit {
+    /// URI of the document containing this occurrence.
+    pub uri: String,
     /// Whether this hit is the declaration itself.
     pub is_declaration: bool,
     pub range: Range,
@@ -702,13 +704,16 @@ impl LanguageService {
             });
         }
         for reference in snapshot.symbols.references_at(byte) {
+            let Some(target) = reference.target else {
+                continue;
+            };
             occurrences.push(Occurrence {
                 role: OccurrenceRole::Reference,
-                target: Some(Box::new(summarize(uri, &snapshot, reference.target))),
+                target: Some(Box::new(summarize(uri, &snapshot, target))),
                 occurrence_range: Some(
                     snapshot.positions.range_of(text, reference.occurrence_span),
                 ),
-                symbol: Box::new(summarize(uri, &snapshot, reference.target)),
+                symbol: Box::new(summarize(uri, &snapshot, target)),
             });
         }
 
@@ -764,7 +769,7 @@ impl LanguageService {
             targets.push(summarize(uri, snapshot, index));
         }
         for reference in snapshot.symbols.references_at(byte) {
-            targets.push(summarize(uri, snapshot, reference.target));
+            targets.extend(self.targets_for_reference(uri, snapshot, reference));
         }
         targets.sort_by(|left, right| {
             left.range
@@ -774,6 +779,66 @@ impl LanguageService {
         });
         targets.dedup();
         targets
+    }
+
+    /// Resolve a reference through the authoritative declaration span. Local
+    /// references are already indexed in `snapshot`; imported references point
+    /// at a declaration span from the imported source, so join them against
+    /// resident document indexes without guessing from text alone.
+    fn targets_for_reference(
+        &self,
+        uri: &str,
+        snapshot: &DocumentAnalysis,
+        reference: &indexes::ReferenceEntry,
+    ) -> Vec<SymbolSummary> {
+        let local = reference
+            .target
+            .map(|target| summarize(uri, snapshot, target));
+        let name = local
+            .as_ref()
+            .map(|summary| summary.name.as_str())
+            .unwrap_or(reference.target_name.as_str());
+        let identity = local
+            .as_ref()
+            .and_then(|summary| summary.identity.as_deref());
+        let mut matches =
+            self.symbols_matching(reference.declaration_span, reference.kind, name, identity);
+        if matches.is_empty() {
+            if let Some(local) = local {
+                matches.push(local);
+            }
+        }
+        matches
+    }
+
+    fn symbols_matching(
+        &self,
+        declaration: mncs_syntax::SourceSpan,
+        kind: SymbolKind,
+        name: &str,
+        identity: Option<&str>,
+    ) -> Vec<SymbolSummary> {
+        let mut matches = Vec::new();
+        for candidate_uri in self.store.document_uris() {
+            let Ok(candidate) = self.snapshot(&candidate_uri) else {
+                continue;
+            };
+            for (index, entry) in candidate.symbols.symbols.iter().enumerate() {
+                if entry.name != name
+                    || entry.kind != kind
+                    || entry.name_span != declaration
+                    || identity.is_some_and(|wanted| {
+                        entry.identity.as_ref().map(|value| value.0.as_str()) != Some(wanted)
+                    })
+                {
+                    continue;
+                }
+                matches.push(summarize(&candidate_uri, &candidate, index));
+            }
+        }
+        matches.sort_by(|left, right| left.uri.cmp(&right.uri));
+        matches.dedup();
+        matches
     }
 
     pub fn references(
@@ -787,40 +852,110 @@ impl LanguageService {
         let text = snapshot.text();
         let byte = snapshot.positions.offset_of(text, line, character);
 
-        let target = self.primary_symbol_index(&snapshot, byte);
-        let Some(target) = target else {
-            return Ok(ReferencesResponse {
-                status: ResponseStatus::Unresolved {
-                    reason: "no resolved symbol at position".to_owned(),
-                },
-                snapshot: Some(snapshot_info(uri, &snapshot)),
-                hits: Vec::new(),
-            });
-        };
-
+        let reference = snapshot.symbols.references_at(byte).next();
+        let declaration = snapshot.symbols.declaration_at(byte);
+        let (declaration_span, kind, target_name, target_summary, target_identity) =
+            if let Some(reference) = reference {
+                let target_summary = reference
+                    .target
+                    .map(|target| summarize(uri, &snapshot, target));
+                let target_name = target_summary
+                    .as_ref()
+                    .map(|summary| summary.name.clone())
+                    .unwrap_or_else(|| reference.target_name.clone());
+                let target_identity = target_summary
+                    .as_ref()
+                    .and_then(|summary| summary.identity.as_deref().map(str::to_owned));
+                (
+                    reference.declaration_span,
+                    reference.kind,
+                    target_name,
+                    target_summary,
+                    target_identity,
+                )
+            } else if let Some(target) = declaration {
+                let summary = summarize(uri, &snapshot, target);
+                (
+                    snapshot.symbols.symbols[target].name_span,
+                    snapshot.symbols.symbols[target].kind,
+                    summary.name.clone(),
+                    Some(summary.clone()),
+                    summary.identity.clone(),
+                )
+            } else {
+                return Ok(ReferencesResponse {
+                    status: ResponseStatus::Unresolved {
+                        reason: "no resolved symbol at position".to_owned(),
+                    },
+                    snapshot: Some(snapshot_info(uri, &snapshot)),
+                    hits: Vec::new(),
+                });
+            };
+        let mut declaration_matches = self.symbols_matching(
+            declaration_span,
+            kind,
+            &target_name,
+            target_identity.as_deref(),
+        );
+        if declaration_matches.is_empty() {
+            if let Some(target_summary) = target_summary.clone() {
+                declaration_matches.push(target_summary);
+            }
+        }
         let mut hits = Vec::new();
         if include_declaration {
-            let entry = &snapshot.symbols.symbols[target];
-            hits.push(ReferenceHit {
-                is_declaration: true,
-                range: snapshot.positions.range_of(text, entry.full_span),
-                name_range: snapshot.positions.range_of(text, entry.name_span),
-                kind: entry.kind,
-                name: entry.name.clone(),
-                container: entry.container.clone(),
-            });
+            for declaration in declaration_matches {
+                let declaration_uri = declaration.uri.clone().unwrap_or_else(|| uri.to_owned());
+                hits.push(ReferenceHit {
+                    uri: declaration_uri,
+                    is_declaration: true,
+                    range: declaration.range,
+                    name_range: declaration.name_range,
+                    kind: declaration.kind,
+                    name: declaration.name,
+                    container: declaration.container,
+                });
+            }
         }
-        for reference in snapshot.symbols.references_to(target) {
-            hits.push(ReferenceHit {
-                is_declaration: false,
-                range: snapshot.positions.range_of(text, reference.occurrence_span),
-                name_range: snapshot.positions.range_of(text, reference.occurrence_span),
-                kind: reference.kind,
-                name: snapshot.symbols.symbols[target].name.clone(),
-                container: snapshot.symbols.symbols[target].container.clone(),
-            });
+        let name = target_name;
+        for occurrence_uri in self.store.document_uris() {
+            let Ok(occurrence_snapshot) = self.snapshot(&occurrence_uri) else {
+                continue;
+            };
+            for occurrence in &occurrence_snapshot.front_end.name_resolutions.resolutions {
+                if occurrence.declaration != declaration_span
+                    || indexes::SymbolKind::from_resolved(occurrence.kind) != kind
+                {
+                    continue;
+                }
+                let Some(occurrence_name) = occurrence_snapshot
+                    .text()
+                    .get(occurrence.occurrence.start..occurrence.occurrence.end)
+                else {
+                    continue;
+                };
+                if occurrence_name != name {
+                    continue;
+                }
+                let range = occurrence_snapshot
+                    .positions
+                    .range_of(occurrence_snapshot.text(), occurrence.occurrence);
+                hits.push(ReferenceHit {
+                    uri: occurrence_uri.clone(),
+                    is_declaration: false,
+                    range,
+                    name_range: range,
+                    kind,
+                    name: name.clone(),
+                    container: None,
+                });
+            }
         }
-        hits.sort_by_key(|hit| hit.range.start_byte);
+        hits.sort_by(|left, right| {
+            left.uri
+                .cmp(&right.uri)
+                .then(left.range.start_byte.cmp(&right.range.start_byte))
+        });
         Ok(ReferencesResponse {
             status: ResponseStatus::Answered,
             snapshot: Some(snapshot_info(uri, &snapshot)),
@@ -833,7 +968,7 @@ impl LanguageService {
             .symbols
             .references_at(byte)
             .next()
-            .map(|reference| reference.target)
+            .and_then(|reference| reference.target)
             .or_else(|| snapshot.symbols.declaration_at(byte))
     }
 
@@ -898,7 +1033,27 @@ impl LanguageService {
         let byte = snapshot
             .positions
             .offset_of(snapshot.text(), line, character);
-        let Some(target) = self.primary_symbol_index(&snapshot, byte) else {
+        let resolved = if let Some(target) = self.primary_symbol_index(&snapshot, byte) {
+            Some((snapshot.clone(), target, summarize(uri, &snapshot, target)))
+        } else if let Some(reference) = snapshot.symbols.references_at(byte).next() {
+            self.targets_for_reference(uri, &snapshot, reference)
+                .into_iter()
+                .next()
+                .and_then(|summary| {
+                    let target_uri = summary.uri.clone()?;
+                    let target_snapshot = self.snapshot(&target_uri).ok()?;
+                    let target_index =
+                        target_snapshot.symbols.symbols.iter().position(|entry| {
+                            entry.name == summary.name
+                                && entry.name_span.start == summary.name_range.start_byte
+                                && entry.kind == summary.kind
+                        })?;
+                    Some((target_snapshot, target_index, summary))
+                })
+        } else {
+            None
+        };
+        let Some((render_snapshot, target, summary)) = resolved else {
             return Ok(HoverResponse {
                 status: ResponseStatus::Unresolved {
                     reason: "no resolvable subject under the cursor".to_owned(),
@@ -908,8 +1063,7 @@ impl LanguageService {
                 markdown: None,
             });
         };
-        let summary = summarize(uri, &snapshot, target);
-        let markdown = render_hover_markdown(&snapshot, target);
+        let markdown = render_hover_markdown(&render_snapshot, target);
         Ok(HoverResponse {
             status: ResponseStatus::Answered,
             snapshot: Some(snapshot_info(uri, &snapshot)),

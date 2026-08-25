@@ -323,6 +323,18 @@ fn comparison_operators_are_classified() {
     doc.assert_scope(">=", "keyword.operator.comparison.mncs");
 }
 
+#[test]
+fn arithmetic_and_logical_operators_are_classified() {
+    let doc = Doc::parse(
+        "mncs 0.6; module operators; fn f(a: i64, b: bool) -> (r: i64) {\n\
+         let n: i64 = a / 2 % 2; if b && true || false { return n; } return n; }",
+    );
+    doc.assert_scope("/", "keyword.operator.arithmetic.mncs")
+        .assert_scope("%", "keyword.operator.arithmetic.mncs")
+        .assert_scope("&&", "keyword.operator.logical.mncs")
+        .assert_scope("||", "keyword.operator.logical.mncs");
+}
+
 // ---------------------------------------------------------------------------
 // Record literals and member access
 // ---------------------------------------------------------------------------

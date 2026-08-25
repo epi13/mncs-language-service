@@ -63,7 +63,7 @@ pub(crate) fn render_hover_markdown(snapshot: &DocumentAnalysis, target: usize) 
                         declared
                             .variants
                             .iter()
-                            .map(|variant| variant.text.as_str())
+                            .map(|variant| variant.name.text.as_str())
                             .collect::<Vec<_>>()
                             .join(", ")
                     ));
@@ -446,9 +446,12 @@ fn member_completions(
 
     // Resolve the base identifier to its declaration.
     if let Some(reference) = snapshot.symbols.references_at(base_token.span.start).next() {
-        let entry = &snapshot.symbols.symbols[reference.target];
+        let Some(target) = reference.target else {
+            return Vec::new();
+        };
+        let entry = &snapshot.symbols.symbols[target];
         return match entry.kind {
-            SymbolKind::FiniteType => variants_of(uri, snapshot, reference.target),
+            SymbolKind::FiniteType => variants_of(uri, snapshot, target),
             SymbolKind::Parameter | SymbolKind::Binding | SymbolKind::IterationState => {
                 let declared_type = entry.type_name.as_deref();
                 snapshot

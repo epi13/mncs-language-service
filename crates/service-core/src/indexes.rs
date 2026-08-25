@@ -31,7 +31,7 @@ pub enum SymbolKind {
 }
 
 impl SymbolKind {
-    fn from_resolved(kind: ResolvedNameKind) -> Self {
+    pub(crate) fn from_resolved(kind: ResolvedNameKind) -> Self {
         match kind {
             ResolvedNameKind::Function => Self::Function,
             ResolvedNameKind::Parameter => Self::Parameter,
@@ -80,9 +80,17 @@ impl SymbolEntry {
 #[derive(Debug, Clone)]
 pub struct ReferenceEntry {
     pub occurrence_span: mncs_syntax::SourceSpan,
+    /// Span of the declaration selected by the authoritative compiler.
+    /// Imported declarations retain their source span so the service can
+    /// join them to the resident workspace document that owns the symbol.
+    pub declaration_span: mncs_syntax::SourceSpan,
     pub kind: SymbolKind,
+    /// Source spelling at the use site. Imported declarations do not have a
+    /// local symbol entry, so this keeps their semantic key available until
+    /// the workspace join resolves the owning document.
+    pub target_name: String,
     /// Index into `SymbolIndex::symbols`.
-    pub target: usize,
+    pub target: Option<usize>,
 }
 
 /// Per-document symbol/reference index.
@@ -143,10 +151,10 @@ impl SymbolIndex {
                 .insert(declared.name.span.start, parent);
             for variant in &declared.variants {
                 let entry = index.push(SymbolEntry {
-                    name: variant.text.clone(),
+                    name: variant.name.text.clone(),
                     kind: SymbolKind::FiniteVariant,
-                    name_span: variant.span,
-                    full_span: variant.span,
+                    name_span: variant.name.span,
+                    full_span: variant.name.span,
                     container: Some(declared.name.text.clone()),
                     identity: program.and_then(|program| {
                         program
@@ -158,7 +166,7 @@ impl SymbolIndex {
                                     .variants
                                     .iter()
                                     .find(|variant_candidate| {
-                                        variant_candidate.name == variant.text
+                                        variant_candidate.name == variant.name.text
                                     })
                                     .map(|found| found.identity.clone())
                             })
@@ -168,7 +176,7 @@ impl SymbolIndex {
                 });
                 index
                     .declarations_by_start
-                    .insert(variant.span.start, entry);
+                    .insert(variant.name.span.start, entry);
             }
         }
 
@@ -249,28 +257,35 @@ impl SymbolIndex {
         }
         // Reference occurrences from the authoritative resolution index.
         for resolution in &front_end.name_resolutions.resolutions {
-            let Some(&target) = index
+            let target = index
                 .declarations_by_start
-                .get(&resolution.declaration.start)
-            else {
-                continue;
-            };
+                .get(&resolution.declaration.start);
             let kind = SymbolKind::from_resolved(resolution.kind);
+            let target_name = front_end
+                .envelope
+                .text
+                .get(resolution.occurrence.start..resolution.occurrence.end)
+                .unwrap_or_default()
+                .to_owned();
             index.references.push(ReferenceEntry {
                 occurrence_span: resolution.occurrence,
+                declaration_span: resolution.declaration,
                 kind,
-                target,
+                target_name,
+                target: target.copied(),
             });
         }
         index
             .references
             .sort_by_key(|entry| entry.occurrence_span.start);
         for entry in &index.references {
-            index
-                .references_by_target
-                .entry(entry.target)
-                .or_default()
-                .push(entry.clone());
+            if let Some(target) = entry.target {
+                index
+                    .references_by_target
+                    .entry(target)
+                    .or_default()
+                    .push(entry.clone());
+            }
         }
 
         index

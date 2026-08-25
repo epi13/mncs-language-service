@@ -44,7 +44,7 @@ What works today:
   not yet recognize MNCS — upstream acceptance is pending real-world usage
   ([details](docs/github-language-support.md)).
 
-What is explicitly not implemented yet: cross-module workspaces (the language itself is single-module today), mutation/semantic patches (Phase 5+), incremental fine-grained invalidation, and any Forge/Fabric/backend integration.
+What is explicitly not implemented yet: mutation/semantic patches (Phase 5+), incremental fine-grained invalidation, and any Forge/Fabric/backend integration.
 
 See [`ROADMAP.md`](ROADMAP.md) for the authoritative status vocabulary.
 
@@ -132,6 +132,51 @@ Run the LSP server over stdio against an MNCS workspace:
 MNLS_WORKSPACE_ROOT=/path/to/mncs/workspace cargo run -p mncs-lsp
 ```
 
+For a stable installed command, install the LSP binary from this repository:
+
+```bash
+cargo install --path crates/lsp --locked --bin mncs-lsp
+```
+
+The installed executable is `mncs-lsp`. It speaks standard Language Server
+Protocol over stdin/stdout; diagnostics and logs are sent through the LSP
+transport or client logging channel, never as ad-hoc stdout text. Clients may
+provide the workspace root during `initialize`; `MNLS_WORKSPACE_ROOT` is an
+optional fallback for clients that do not send one.
+
+### OpenCode
+
+OpenCode enables its built-in language servers and custom servers through the
+`lsp` configuration object. Add the MNCS entry to the applicable global or
+project `opencode.json`/`opencode.jsonc`, preserving any existing settings:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "lsp": {
+    "mncs": {
+      "command": ["mncs-lsp"],
+      "extensions": [".mncs"]
+    }
+  }
+}
+```
+
+The same configuration keeps ordinary built-in servers such as
+`rust-analyzer` available. OpenCode's agent-facing `lsp` tool is experimental
+in versions that expose it; enable it persistently in the user's environment
+with `OPENCODE_EXPERIMENTAL_LSP_TOOL=true` (or the broader
+`OPENCODE_EXPERIMENTAL=true`). A copyable configuration example is in
+[`integration/opencode/opencode.jsonc`](integration/opencode/opencode.jsonc).
+
+OpenCode starts `mncs-lsp` for `.mncs` files and uses the same semantic core as
+other editors. The service supports full-document synchronization, published
+diagnostics, hover, cross-file definition and references, document/workspace
+symbols, semantic tokens, conservative completion, highlights, and folding.
+Rename, code actions, formatting, signature help, and fine-grained incremental
+invalidations remain intentionally unsupported until the authoritative
+language APIs make them safe and useful.
+
 Any LSP-capable editor can attach; e.g. Neovim (built-in LSP):
 
 ```lua
@@ -164,6 +209,13 @@ or point either server at this repository's own fixtures:
 
 ```bash
 MNLS_WORKSPACE_ROOT=$PWD/tests/fixtures cargo run -p mncs-lsp
+```
+
+Run the protocol and real-stdio tests directly:
+
+```bash
+cargo test -p mncs-lsp --test lsp_protocol
+cargo test -p mncs-service-core --test module_imports
 ```
 
 `mncs-language` is consumed from `main`; the authoritative `NameResolutionIndex` recorded by elaboration and the public `contract_id` constructor are part of main.

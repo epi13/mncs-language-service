@@ -124,13 +124,18 @@ pub fn expected_scope(kind: TokenKind) -> &'static str {
         TokenKind::Version => "constant.numeric.version.mncs",
         TokenKind::IntegerLiteral => "constant.numeric.integer.mncs",
 
-        TokenKind::Plus | TokenKind::Minus | TokenKind::Star => "keyword.operator.arithmetic.mncs",
+        TokenKind::Plus
+        | TokenKind::Minus
+        | TokenKind::Star
+        | TokenKind::Slash
+        | TokenKind::Percent => "keyword.operator.arithmetic.mncs",
         TokenKind::EqEq
         | TokenKind::NotEq
         | TokenKind::Lt
         | TokenKind::Gt
         | TokenKind::Le
         | TokenKind::Ge => "keyword.operator.comparison.mncs",
+        TokenKind::AndAnd | TokenKind::OrOr => "keyword.operator.logical.mncs",
         TokenKind::Equal => "keyword.operator.assignment.mncs",
         TokenKind::Arrow | TokenKind::FatArrow => "keyword.operator.arrow.mncs",
 
