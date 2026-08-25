@@ -35,7 +35,10 @@ What works today:
 - obligations with preserved `PASS` / `FAIL` / `UNKNOWN` status;
 - candidate analysis (Phase 4): isolated candidate snapshots with language-owned
   semantic/obligation deltas and stale-evidence detection (`analyze_candidate`,
-  MCP + native), never mutating the workspace baseline;
+  MCP + native), never mutating the workspace baseline. Candidates elaborate
+  against the same resident resolution as their baseline (workspace documents
+  plus `MNCS_LIBRARY_PATH` standard-library roots), so editing an importing
+  module yields real deltas instead of false unresolvable-import diagnostics;
 - a read-only MCP tool surface for agents over the same resident state;
 - **static syntax + GitHub/Linguist readiness (Phase 4.5)**: a production
   TextMate grammar (`source.mncs`) with mechanical drift protection against

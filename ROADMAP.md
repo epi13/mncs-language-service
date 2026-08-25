@@ -121,6 +121,13 @@ Working:
   explicit unresolved note; nothing is promoted or guessed;
 - MCP tool `analyze_candidate(uri, candidate_text)` (read-only).
 
+Update (2026-08, RAVEL-driven): candidates now elaborate against the same
+resident resolution as their baseline — workspace documents plus
+`MNCS_LIBRARY_PATH` standard-library roots in `StoreResolver` — so editing an
+importing module produces true semantic deltas rather than false
+unresolvable-import diagnostics. Exercised against the real linked RAVEL
+workspace (`crates/service-core/tests/ravel_integration.rs`).
+
 Not yet implemented: cross-document candidate workspaces (the language is
 single-module), candidate persistence across restarts, evidence-freshness
 joins against external Forge records, and mutation (Phase 5 remains gated on
