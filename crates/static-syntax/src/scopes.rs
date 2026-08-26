@@ -116,6 +116,8 @@ pub fn expected_scope(kind: TokenKind) -> &'static str {
         TokenKind::UpToKeyword => "keyword.control.iteration.up-to.mncs",
         TokenKind::CarryingKeyword => "keyword.control.iteration.carrying.mncs",
         TokenKind::NextKeyword => "keyword.control.flow.next.mncs",
+        TokenKind::OverKeyword => "keyword.control.iteration.over.mncs",
+        TokenKind::AsKeyword => "keyword.operator.conversion.mncs",
         TokenKind::WhileKeyword => "keyword.control.flow.while.mncs",
         TokenKind::TrueKeyword | TokenKind::FalseKeyword => "constant.language.boolean.mncs",
 
@@ -135,6 +137,12 @@ pub fn expected_scope(kind: TokenKind) -> &'static str {
         | TokenKind::PlusPipe
         | TokenKind::MinusPipe
         | TokenKind::StarPipe => "keyword.operator.arithmetic.mncs",
+        // Bitwise and shift operators (Source Profile 0.7).
+        TokenKind::Ampersand
+        | TokenKind::Pipe
+        | TokenKind::Caret
+        | TokenKind::Shl
+        | TokenKind::Shr => "keyword.operator.bitwise.mncs",
         TokenKind::EqEq
         | TokenKind::NotEq
         | TokenKind::Lt
@@ -156,6 +164,8 @@ pub fn expected_scope(kind: TokenKind) -> &'static str {
         TokenKind::RightParen => "punctuation.section.parentheses.end.mncs",
         TokenKind::LeftBrace => "punctuation.section.block.begin.mncs",
         TokenKind::RightBrace => "punctuation.section.block.end.mncs",
+        TokenKind::LeftBracket => "punctuation.section.brackets.begin.mncs",
+        TokenKind::RightBracket => "punctuation.section.brackets.end.mncs",
 
         TokenKind::Unknown => "",
     }
