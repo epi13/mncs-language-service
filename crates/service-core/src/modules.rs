@@ -11,26 +11,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use mncs_compiler::ModuleResolver;
-use mncs_syntax::SourceEnvelope;
+use mncs_syntax::{declared_module_name, module_names_compatible, SourceEnvelope};
 
 use crate::document::DocumentStore;
-
-/// Extracts the declared `module <name>;` from source text without parsing.
-/// Import resolution needs only the name, so a cheap scan keeps resolution
-/// proportional to workspace size rather than AST size.
-pub fn declared_module_name(text: &str) -> Option<String> {
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("module ") {
-            let name = rest.trim_end();
-            let name = name.strip_suffix(';').unwrap_or(name).trim();
-            if !name.is_empty() {
-                return Some(name.to_owned());
-            }
-        }
-    }
-    None
-}
 
 /// Candidate file paths for one dotted module name under one root directory,
 /// mirroring the research CLI's discovery layout: full dotted path, then a
@@ -127,6 +110,12 @@ impl ModuleResolver for StoreResolver<'_> {
             for root in &self.library_roots {
                 for path in candidate_paths(root, module) {
                     if let Ok(text) = std::fs::read_to_string(&path) {
+                        let Some(declared) = declared_module_name(&text) else {
+                            continue;
+                        };
+                        if !module_names_compatible(module, &declared) {
+                            continue;
+                        }
                         let uri = format!("file://{}", path.display());
                         return Some(self.store.envelope(&uri, &text));
                     }

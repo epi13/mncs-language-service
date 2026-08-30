@@ -47,7 +47,7 @@ What works today:
   not yet recognize MNCS — upstream acceptance is pending real-world usage
   ([details](docs/github-language-support.md)).
 
-What is explicitly not implemented yet: mutation/semantic patches (Phase 5+), incremental fine-grained invalidation, and any Forge/Fabric/backend integration.
+What is explicitly not implemented yet: mutation/semantic patches (Phase 5+), incremental fine-grained invalidation, and direct Forge/Fabric/backend execution integration. The service does include a drift-guard fixture that resolves the shared MNCS-native Forge source spine through `MNCS_LIBRARY_PATH`.
 
 See [`ROADMAP.md`](ROADMAP.md) for the authoritative status vocabulary.
 
@@ -102,6 +102,14 @@ LSP and MCP are adapters over one shared resident core. Neither protocol defines
 - service observability and lifecycle.
 
 A language semantic capability required by the service is added to `mncs-language` and consumed here rather than reimplemented here. The service currently consumes one such upstream API beyond main's baseline: the [`NameResolutionIndex`](https://github.com/epi13/mncs-language/pull/…) recorded by elaboration (`mncs-compiler`), which provides authoritative use-site→declaration binding without duplicating scoping rules.
+
+The module resolver also validates discovered source declarations against their
+requested import names (including version-tail compatibility). This keeps the
+service bound to the declared module identity when multiple sibling language
+and Forge roots contain similarly named files. The
+`native-forge-service.mncs` fixture resolves `mncs.forge.core.v1` from the
+shared Forge checkout and is a synchronization guard, not a second Forge
+semantic implementation.
 
 ## Repository layout
 

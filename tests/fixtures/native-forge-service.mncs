@@ -1,0 +1,12 @@
+mncs 0.10;
+
+// Drift guard: this fixture binds the service to the same native Forge core
+// source consumed by the Forge adapter, rather than duplicating its API.
+module fixtures.native_forge_service;
+
+use mncs.core.status as status;
+use mncs.forge.core as forge;
+
+fn probe() -> (result: status.Status) {
+    return forge.status_probe();
+}
