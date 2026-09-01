@@ -345,6 +345,26 @@ impl MncsSemanticServer {
     }
 
     #[tool(
+        description = "EXPERIMENTAL MNCS-native bounded obligation summary. Projects the authoritative PASS/FAIL/UNKNOWN statuses into a bounded MNCS query, executes the real mncs-language research-bytecode backend, and compares its counts with the Rust control result. Unsupported or inconsistent results fail closed."
+    )]
+    async fn native_obligations(
+        &self,
+        Parameters(ObligationsParams {
+            uri,
+            subject_identity,
+        }): Parameters<ObligationsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let uri = self.resolve_uri(&uri);
+        match self
+            .service()
+            .native_obligations(&uri, subject_identity.as_deref())
+        {
+            Ok(response) => Ok(self.answered(serialize(&response))),
+            Err(error) => Ok(self.failed(error.to_string())),
+        }
+    }
+
+    #[tool(
         description = "EXPERIMENTAL bounded semantic context packet around a subject: its declaration excerpt plus callee excerpts within budget. 'complete' is true only when the whole outgoing-call closure fit in the budget."
     )]
     async fn context_packet(

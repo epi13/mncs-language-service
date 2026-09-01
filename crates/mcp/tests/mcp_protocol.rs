@@ -88,6 +88,7 @@ async fn lists_expected_read_only_tools() {
         "list_symbols",
         "semantic_dependencies",
         "obligations",
+        "native_obligations",
         "context_packet",
     ] {
         assert!(
@@ -234,6 +235,25 @@ async fn identity_describe_and_dependencies_agree() {
     let payload = packet.structured_content.expect("structured");
     assert_eq!(payload["complete"], false);
     assert!(payload["notes"].is_string());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_obligations_executes_through_the_real_tool_surface() {
+    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language/library");
+    std::env::set_var("MNCS_LIBRARY_PATH", library);
+
+    let harness = spawn_server().await;
+    let result = call(
+        &harness.peer,
+        "native_obligations".to_owned(),
+        serde_json::json!({ "uri": uri_for("valid-contracts.mncs") }),
+    )
+    .await;
+    assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
+    let payload = result.structured_content.expect("structured content");
+    assert_eq!(payload["status"]["kind"], "answered");
+    assert_eq!(payload["counts"], payload["reference_counts"]);
+    assert_eq!(payload["native"]["backend"], "mncs-research-bytecode");
 }
 
 #[tokio::test(flavor = "multi_thread")]

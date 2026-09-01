@@ -1,0 +1,14 @@
+mncs 0.9;
+
+// The service owns this adapter signature; the status lattice and aggregation
+// semantics remain authoritative in mncs.core.status.v1.
+module mncs.language_service.status_query.v1;
+
+use mncs.core.status.v1;
+
+fn summarize_obligations(
+    statuses: [Status; 8],
+    count: byte
+) -> (result: StatusSummary) {
+    return summarize8(statuses, count);
+}

@@ -260,3 +260,39 @@ now records every name-binding decision as a `NameResolutionIndex`
 (`use-site span → declaration span`, classified by declaration kind). The index
 is best-effort so partially valid documents stay navigable. The service joins it
 against its declaration inventory; it never re-implements scoping.
+
+## MNCS-native query kernel (implemented / experimental)
+
+The first executable MNCS slice is deliberately below the host/service
+boundary, not a replacement for it:
+
+```text
+authoritative DocumentAnalysis / Program::generate_obligations
+                         │ exact bounded status projection
+                         ▼
+      mncs/status_query.mncs + mncs.core.status.v1
+                         │ ReferenceCompiler + research-bytecode
+                         ▼
+  identity-validated StatusSummary ──┐
+                                      ├─ differential comparison
+  Rust control StatusCounts ──────────┘
+```
+
+The MNCS module owns only deterministic status aggregation that is already
+represented by the language standard library. The Rust adapter owns projection
+from service records, workspace/library resolution, artifact caching,
+execution-budget policy, returned-value validation, response mapping, and the
+fail-closed decision. Filesystem access, document lifecycle, locks, LSP/MCP
+transport, process management, and authoritative semantic generation remain
+Rust responsibilities.
+
+The kernel is compiled and frozen by the real `mncs-language` toolchain, then
+reused while its source identity and the resolved `mncs.core.status.v1`
+dependency identity are unchanged. It currently selects only the
+`mncs-research-bytecode` realization and is bounded to eight obligations. The
+MCP `native_obligations` tool exposes this as an experimental read-only query;
+it is not the richer Phase 6 native ecosystem protocol.
+
+The conversion record in [`docs/mncs-native-conversion.md`](mncs-native-conversion.md)
+tracks what has moved, what remains host-bound, and the evidence-led next
+tranche.

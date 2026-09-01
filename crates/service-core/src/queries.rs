@@ -426,6 +426,25 @@ pub struct ContextExcerpt {
     pub text: String,
 }
 
+/// Result of the first MNCS-native service query. `reference_counts` are the
+/// Rust control result; `counts` are the independently executed MNCS result.
+/// A response is `Unsupported` whenever the two disagree or the native path
+/// cannot prove that its bounded input and output are valid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeObligationsResponse {
+    pub status: ResponseStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<SnapshotInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub obligations: Vec<ObligationInfo>,
+    pub reference_counts: StatusCounts,
+    pub counts: StatusCounts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native: Option<crate::native_query::NativeStatusSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -445,6 +464,7 @@ pub struct LanguageService {
     /// Serializes concurrent analysis of the same document without holding
     /// global locks during expensive frontend work.
     analyze_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    pub(crate) native_kernel: RwLock<Option<Arc<crate::native_query::NativeQueryKernel>>>,
 }
 
 impl Default for LanguageService {
@@ -459,6 +479,7 @@ impl LanguageService {
             store: DocumentStore::new(root),
             analyses: RwLock::new(BTreeMap::new()),
             analyze_locks: Mutex::new(BTreeMap::new()),
+            native_kernel: RwLock::new(None),
         }
     }
 
@@ -1355,6 +1376,109 @@ impl LanguageService {
         Ok(response)
     }
 
+    /// Execute the bounded MNCS-native status kernel against the exact
+    /// obligation projection produced by the authoritative frontend.
+    ///
+    /// This is an explicit experimental path: the ordinary `obligations`
+    /// query remains the Rust control implementation, while this method
+    /// retains both sides of the differential comparison and fails closed on
+    /// missing library/backend support, invalid values, or disagreement.
+    pub fn native_obligations(
+        &self,
+        uri: &str,
+        subject_identity: Option<&str>,
+    ) -> Result<NativeObligationsResponse, ServiceError> {
+        let reference = self.obligations_response(uri, subject_identity)?;
+        let snapshot = reference.snapshot.clone();
+        if reference.status != ResponseStatus::Answered {
+            return Ok(NativeObligationsResponse {
+                status: reference.status,
+                snapshot,
+                obligations: reference.obligations,
+                reference_counts: reference.counts,
+                counts: reference.counts,
+                native: None,
+                unresolved: vec![
+                    "native status execution was not attempted because the authoritative program is unavailable"
+                        .to_owned(),
+                ],
+            });
+        }
+
+        let statuses = reference
+            .obligations
+            .iter()
+            .map(|obligation| obligation.status.as_str())
+            .collect::<Vec<_>>();
+        let native = crate::native_query::execute_status_summary(
+            &self.native_kernel,
+            &self.store,
+            &statuses,
+        );
+        let reference_counts = reference.counts;
+        match native {
+            Ok(native) => {
+                let native_counts = StatusCounts {
+                    pass: native.pass_count,
+                    fail: native.fail_count,
+                    unknown: native.unknown_count,
+                };
+                let expected_status = dominant_status(&reference_counts);
+                let mut unresolved = Vec::new();
+                if native_counts != reference_counts {
+                    unresolved.push(format!(
+                        "MNCS-native status counts disagree with the Rust control result: reference={reference_counts:?}, native={native_counts:?}"
+                    ));
+                }
+                if native.observed_count != statuses.len() {
+                    unresolved.push(format!(
+                        "MNCS-native status kernel observed {} of {} projected obligations",
+                        native.observed_count,
+                        statuses.len()
+                    ));
+                }
+                if !native.valid {
+                    unresolved
+                        .push("MNCS-native status kernel rejected its bounded envelope".to_owned());
+                }
+                if native.dominant_status != expected_status {
+                    unresolved.push(format!(
+                        "MNCS-native dominant status {:?} disagrees with the Rust control result {:?}",
+                        native.dominant_status, expected_status
+                    ));
+                }
+                let status = if unresolved.is_empty() {
+                    ResponseStatus::Answered
+                } else {
+                    ResponseStatus::Unsupported {
+                        reason: "MNCS-native status query did not agree with the authoritative Rust control result"
+                            .to_owned(),
+                    }
+                };
+                Ok(NativeObligationsResponse {
+                    status,
+                    snapshot,
+                    obligations: reference.obligations,
+                    reference_counts,
+                    counts: native_counts,
+                    native: Some(native),
+                    unresolved,
+                })
+            }
+            Err(reason) => Ok(NativeObligationsResponse {
+                status: ResponseStatus::Unsupported {
+                    reason: format!("MNCS-native status query unavailable: {reason}"),
+                },
+                snapshot,
+                obligations: reference.obligations,
+                reference_counts,
+                counts: reference_counts,
+                native: None,
+                unresolved: vec![reason],
+            }),
+        }
+    }
+
     fn obligations_response(
         &self,
         uri: &str,
@@ -1661,6 +1785,21 @@ fn evidence_status_label(status: &mncs_model::EvidenceStatus) -> &'static str {
 
 fn obligation_status_label(status: &ObligationStatus) -> &'static str {
     indexes::obligation_status_label(status)
+}
+
+fn dominant_status(counts: &StatusCounts) -> String {
+    if counts.fail > 0 {
+        "fail"
+    } else if counts.unknown > 0 {
+        "unknown"
+    } else if counts.pass > 0 {
+        "pass"
+    } else {
+        // The MNCS status lattice starts an empty bounded envelope at UNKNOWN;
+        // keep the Rust control interpretation aligned with that behavior.
+        "unknown"
+    }
+    .to_owned()
 }
 
 fn obligation_subject_matches(

@@ -852,7 +852,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "mncs-codegen"
 version = "0.1.0"
-source = "git+https://github.com/epi13/mncs-language?branch=main#04549c55f3c55f603cbc4a905bee3e82fff41d45"
+source = "git+https://github.com/epi13/mncs-language?branch=main#c992baedbf34c986f5d33fffd3b58d7ebff5200c"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -870,7 +870,7 @@ dependencies = [
 [[package]]
 name = "mncs-compiler"
 version = "0.1.0"
-source = "git+https://github.com/epi13/mncs-language?branch=main#04549c55f3c55f603cbc4a905bee3e82fff41d45"
+source = "git+https://github.com/epi13/mncs-language?branch=main#c992baedbf34c986f5d33fffd3b58d7ebff5200c"
 dependencies = [
  "mncs-codegen",
  "mncs-model",
@@ -908,7 +908,7 @@ dependencies = [
 [[package]]
 name = "mncs-model"
 version = "0.1.0"
-source = "git+https://github.com/epi13/mncs-language?branch=main#04549c55f3c55f603cbc4a905bee3e82fff41d45"
+source = "git+https://github.com/epi13/mncs-language?branch=main#c992baedbf34c986f5d33fffd3b58d7ebff5200c"
 dependencies = [
  "serde",
  "serde_json",
@@ -920,6 +920,7 @@ dependencies = [
 name = "mncs-service-core"
 version = "0.1.0"
 dependencies = [
+ "mncs-codegen",
  "mncs-compiler",
  "mncs-model",
  "mncs-syntax",
@@ -943,7 +944,7 @@ dependencies = [
 [[package]]
 name = "mncs-syntax"
 version = "0.1.0"
-source = "git+https://github.com/epi13/mncs-language?branch=main#04549c55f3c55f603cbc4a905bee3e82fff41d45"
+source = "git+https://github.com/epi13/mncs-language?branch=main#c992baedbf34c986f5d33fffd3b58d7ebff5200c"
 dependencies = [
  "serde",
  "serde_json",

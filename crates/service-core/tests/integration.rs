@@ -285,6 +285,59 @@ fn obligations_preserve_pass_fail_unknown() {
 }
 
 #[test]
+fn native_obligations_differentially_agree_with_rust_control() {
+    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language/library");
+    std::env::set_var("MNCS_LIBRARY_PATH", library);
+
+    let svc = service();
+    let uri = fixture_uri(CONTRACTS);
+    let response = svc
+        .native_obligations(&uri, None)
+        .expect("native obligations");
+    assert_eq!(response.status, ResponseStatus::Answered, "{response:#?}");
+    assert_eq!(response.counts, response.reference_counts);
+    let native = response.native.expect("native execution evidence");
+    assert_eq!(native.backend, "mncs-research-bytecode");
+    assert_eq!(native.input_count, response.obligations.len());
+    assert_eq!(native.observed_count, response.obligations.len());
+    assert!(native.valid);
+    assert!(native.pass_count > 0);
+    assert!(native.unknown_count > 0);
+    assert_eq!(native.dominant_status, "unknown");
+
+    // The frozen artifact is reused for an unchanged dependency/source pair.
+    let again = svc
+        .native_obligations(&uri, None)
+        .expect("native obligations reuse");
+    assert_eq!(
+        again
+            .native
+            .expect("native execution evidence")
+            .kernel_artifact_identity,
+        native.kernel_artifact_identity
+    );
+}
+
+#[test]
+fn native_obligations_preserves_empty_unknown_summary() {
+    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language/library");
+    std::env::set_var("MNCS_LIBRARY_PATH", library);
+
+    let svc = service();
+    let response = svc
+        .native_obligations(&fixture_uri("records.mncs"), None)
+        .expect("native empty obligations");
+    assert_eq!(response.status, ResponseStatus::Answered, "{response:#?}");
+    assert_eq!(response.reference_counts, Default::default());
+    let native = response.native.expect("native execution evidence");
+    assert_eq!(native.input_count, 0);
+    assert_eq!(native.observed_count, 0);
+    assert_eq!(native.unknown_count, 0);
+    assert_eq!(native.dominant_status, "unknown");
+    assert!(native.valid);
+}
+
+#[test]
 fn document_symbols_include_profile_05_records_and_fields() {
     let svc = service();
     let uri = fixture_uri("records.mncs");

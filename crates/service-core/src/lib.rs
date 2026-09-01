@@ -17,6 +17,7 @@ mod document;
 mod error;
 mod indexes;
 mod modules;
+mod native_query;
 mod queries;
 mod render;
 
@@ -29,13 +30,15 @@ pub use coords::{PositionInfo, PositionMap, RangeInfo};
 pub use document::{DocumentStore, MAX_DISCOVERED_DOCUMENTS, MAX_DOCUMENT_BYTES};
 pub use error::ServiceError;
 pub use indexes::{ReferenceEntry, SymbolEntry, SymbolIndex, SymbolKind};
+pub use native_query::NativeStatusSummary;
 pub use queries::{
     CompletionCandidate, CompletionClass, ContextExcerpt, ContextPacketResponse,
     DefinitionResponse, DescribeResponse, DiagnosticItem, DiagnosticsResponse, DocumentStatusEntry,
     DocumentSymbolNode, DocumentSymbolsResponse, EffectInfo, FoldRange, FoldingRangesResponse,
     GraphEdgeTarget, GraphResponse, HighlightsResponse, HoverResponse, LanguageService, MemberInfo,
-    ObligationInfo, ObligationsResponse, Occurrence, OccurrenceRole, PositionQueryResponse,
-    ReferenceHit, ReferencesResponse, ResponseStatus, SemanticTokensResponse, SnapshotInfo,
-    StatusCounts, SubjectDescription, SymbolSummary, TokenAnnotation, TokenClass,
-    WorkspaceStatusResponse, WorkspaceSymbolHit, WorkspaceSymbolsResponse,
+    NativeObligationsResponse, ObligationInfo, ObligationsResponse, Occurrence, OccurrenceRole,
+    PositionQueryResponse, ReferenceHit, ReferencesResponse, ResponseStatus,
+    SemanticTokensResponse, SnapshotInfo, StatusCounts, SubjectDescription, SymbolSummary,
+    TokenAnnotation, TokenClass, WorkspaceStatusResponse, WorkspaceSymbolHit,
+    WorkspaceSymbolsResponse,
 };

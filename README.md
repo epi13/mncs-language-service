@@ -8,7 +8,7 @@ The service maintains **resident workspace state**: it tracks documents, runs th
 
 ## Status
 
-**Phase 1–3 first implementation: working vertical slice (implemented / exercised).**
+**Phase 1–4.6 first implementation: working vertical slice (implemented / exercised, with an experimental MNCS-native query kernel).**
 
 ```text
 MNCS source
@@ -18,6 +18,7 @@ resident authoritative analysis   (mncs-syntax → mncs-compiler → mncs-model)
 identity-bound snapshot           (mncs:source:artifact:<sha256> + workspace generation)
    ↓
 shared semantic query core        (mncs-service-core)
+   ├── MNCS-native bounded query kernel (real mncs-language compilation/execution)
    ├── LSP  → mncs-lsp            editor diagnostics/navigation/hover/tokens/completion
    └── MCP  → mncs-mcp            agent semantic inspection (read-only)
 ```
@@ -33,6 +34,10 @@ What works today:
 - semantic tokens, conservative completion, folding ranges;
 - call-graph dependencies/dependents derived from elaborated bodies;
 - obligations with preserved `PASS` / `FAIL` / `UNKNOWN` status;
+- experimental `native_obligations`: projects the authoritative obligation
+  statuses into a bounded MNCS query, executes the real
+  `mncs-research-bytecode` backend, validates identity-bound results, and
+  differentially compares them with the Rust control result;
 - candidate analysis (Phase 4): isolated candidate snapshots with language-owned
   semantic/obligation deltas and stale-evidence detection (`analyze_candidate`,
   MCP + native), never mutating the workspace baseline. Candidates elaborate
@@ -47,7 +52,7 @@ What works today:
   not yet recognize MNCS — upstream acceptance is pending real-world usage
   ([details](docs/github-language-support.md)).
 
-What is explicitly not implemented yet: mutation/semantic patches (Phase 5+), incremental fine-grained invalidation, and direct Forge/Fabric/backend execution integration. The service does include a drift-guard fixture that resolves the shared MNCS-native Forge source spine through `MNCS_LIBRARY_PATH`.
+What is explicitly not implemented yet: mutation/semantic patches (Phase 5+), incremental fine-grained invalidation, broader native query families, and direct Forge/Fabric execution integration. The native obligation path is bounded to eight statuses, currently selects only the research-bytecode backend, and requires `MNCS_LIBRARY_PATH` for the authoritative status standard-library module. The service does include a drift-guard fixture that resolves the shared MNCS-native Forge source spine through `MNCS_LIBRARY_PATH`.
 
 See [`ROADMAP.md`](ROADMAP.md) for the authoritative status vocabulary.
 
@@ -99,6 +104,7 @@ LSP and MCP are adapters over one shared resident core. Neither protocol defines
   assets, as shallow presentation adapters over the authoritative language
   ([`integration/`](integration/README.md));
 - interaction policy around stale snapshots and candidate changes;
+- the MNCS-native query adapter source and its fail-closed differential policy;
 - service observability and lifecycle.
 
 A language semantic capability required by the service is added to `mncs-language` and consumed here rather than reimplemented here. The service currently consumes one such upstream API beyond main's baseline: the [`NameResolutionIndex`](https://github.com/epi13/mncs-language/pull/…) recorded by elaboration (`mncs-compiler`), which provides authoritative use-site→declaration binding without duplicating scoping rules.
@@ -123,6 +129,8 @@ crates/
 integration/        third-party integration assets (TextMate grammar package,
                     GitHub/Linguist readiness kit) — see integration/README.md
 tests/fixtures/     representative MNCS sources shared by all test levels
+mncs/               service-specific MNCS query modules executed through
+                    the authoritative compiler/backend
 docs/               architecture, protocol model, agent interface, trust boundary
 ```
 
@@ -231,6 +239,12 @@ cargo test -p mncs-service-core --test module_imports
 
 `mncs-language` is consumed from `main`; the authoritative `NameResolutionIndex` recorded by elaboration and the public `contract_id` constructor are part of main.
 
+The experimental `native_obligations` MCP operation additionally requires
+`MNCS_LIBRARY_PATH` to point at a checkout's `mncs-language/library` directory.
+It is a read-only differential proving path: the Rust service still acquires
+the authoritative obligations and retains them beside the MNCS result, while
+the bounded status aggregation executes from [`mncs/status_query.mncs`](mncs/status_query.mncs).
+
 ## Core principles
 
 1. **One semantic authority.** The service consumes `mncs-language`; it does not redefine MNCS.
@@ -238,10 +252,13 @@ cargo test -p mncs-service-core --test module_imports
 3. **Identity-bound interaction.** Every response names the exact snapshot (source identity + generation) it was computed against.
 4. **Human and machine symmetry.** Editors and agents inspect the same underlying semantic structure through role-appropriate representations.
 5. **PASS / FAIL / UNKNOWN preservation.** Missing or bounded evidence is never converted into stronger claims.
-6. **Bounded work.** Expensive verification, backend execution, Forge search, or Fabric work is never triggered by ordinary queries.
-7. **Protocol independence.** Internal concepts are defined by the service query model, not by LSP/MCP schemas.
-8. **Fail closed on stale state.** Ambiguity yields explicit `unsupported`/`unresolved` outcomes, not guesses.
-9. **Semantic density for agents.** Structured responses favor identities, kinds, relationships, spans, contracts, capabilities, effects, and obligation state over prose blobs.
+6. **Fail-closed native execution.** A missing library, invalid artifact,
+   malformed return value, unsupported backend, or Rust/MNCS mismatch yields an
+   explicit unsupported result rather than a guessed semantic answer.
+7. **Bounded work.** Expensive verification, backend execution, Forge search, or Fabric work is never triggered by ordinary queries.
+8. **Protocol independence.** Internal concepts are defined by the service query model, not by LSP/MCP schemas.
+9. **Fail closed on stale state.** Ambiguity yields explicit `unsupported`/`unresolved` outcomes, not guesses.
+10. **Semantic density for agents.** Structured responses favor identities, kinds, relationships, spans, contracts, capabilities, effects, and obligation state over prose blobs.
 
 ## Relationship to the MNCS family
 
