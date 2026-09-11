@@ -18,6 +18,9 @@ strictly shallow:
 | Asset | Depth limit |
 | --- | --- |
 | TextMate grammar (`static-syntax/`) | Lexical classification only. No name resolution, no capability checking, no contract validation, no elaboration. |
+| KDE syntax (`kde/`) | Lexical classification only, expressed through KSyntaxHighlighting semantic default styles. |
+| Kate project (`kate/`) | Process wiring only. Kate asks `mncs-lsp` for all semantic behavior. |
+| VS Code adapter (`vscode/`) | Process wiring plus the shared TextMate grammar. VS Code asks `mncs-lsp` for all semantic behavior. |
 | Linguist metadata (`github-linguist/`) | File-type identification and language statistics only. |
 
 The richer, authoritative path for capable environments remains LSP semantic
@@ -35,6 +38,9 @@ mechanically; see `crates/static-syntax/` and
 integration/
   static-syntax/            canonical TextMate grammar package (source.mncs)
     mncs.tmLanguage.json    THE grammar — single source of truth for static highlighting
+  kde/                      KSyntaxHighlighting XML for KWrite/Kate + validation
+  kate/                     Kate LSP project configuration example
+  vscode/                   thin VS Code grammar + LSP client extension
   github-linguist/          GitHub/Linguist readiness kit
     languages.yml.fragment  prepared upstream language definition
     samples/                curated real-world corpus + PROVENANCE.md
@@ -48,9 +54,14 @@ integration/
 The grammar file itself is editor-agnostic:
 
 - **GitHub/Linguist** — vendored via `script/add-grammar` (see PR-CHECKLIST).
-- **VS Code** — a future extension references this `.tmLanguage.json`
-  directly (`"grammars": [{"language": "mncs", "path": "./…json"}]`). Do not
-  fork the rules.
+- **KWrite / Kate** — `kde/mncs.xml` is a generated-by-hand presentation
+  adapter validated against the same keyword manifest. Install it with
+  `kde/install.sh`.
+- **Kate LSP** — `kate/mncs.kateproject.example` configures the thin
+  `mncs-lsp` adapter for a project.
+- **VS Code** — `vscode/package.sh` packages an extension that copies this
+  grammar into the VSIX and starts `mncs-lsp` through the standard client.
+  Do not fork the rules.
 - **Zed / Sublime / TextMate-compatible tools** — consume the same JSON
   (Sublime via conversion of this file, not a parallel hand-written syntax).
 - **Documentation renderers** — any TextMate-compatible highlighter can load

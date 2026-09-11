@@ -1,0 +1,7 @@
+.vscode/**
+.vscode-test/**
+test/**
+src/**
+**/*.map
+package-lock.json
+npm-debug.log

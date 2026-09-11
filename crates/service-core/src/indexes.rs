@@ -397,6 +397,8 @@ pub(crate) fn contract_kind_label(kind: &ContractKind) -> &'static str {
         ContractKind::Invariant => "invariant",
         ContractKind::Preserves => "preserves",
         ContractKind::Budget => "budget",
+        ContractKind::Property => "property",
+        ContractKind::Metamorphic => "metamorphic",
     }
 }
 

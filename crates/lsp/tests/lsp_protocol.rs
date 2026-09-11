@@ -42,11 +42,15 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Self {
-        let (service, socket) = mncs_lsp::create_service(Some(fixtures_dir()));
+        Self::new_at(fixtures_dir()).await
+    }
+
+    async fn new_at(root: PathBuf) -> Self {
+        let (service, socket) = mncs_lsp::create_service(Some(root.clone()));
         let mut harness = Self { service, socket };
         let initialize = serde_json::json!({
             "processId": std::process::id(),
-            "rootUri": fixture_uri_as_root(),
+            "rootUri": format!("file://{}", root.canonicalize().expect("root path").display()),
             "capabilities": {},
         });
         eprintln!("HARNESS sending initialize");
@@ -336,6 +340,136 @@ async fn document_symbols_and_semantic_tokens_are_served() {
         data.len() >= 25,
         "keywords/types/functions are classified: {data:?}"
     );
+
+    harness.request("shutdown", None).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completion_and_folding_are_served() {
+    let mut harness = Harness::new().await;
+    let uri = fixture_uri("finite-match.mncs");
+    let text = std::fs::read_to_string(fixtures_dir().join("finite-match.mncs")).expect("fixture");
+
+    harness
+        .notify(
+            "textDocument/didOpen",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri, "languageId": "mncs", "version": 1, "text": text },
+            })),
+        )
+        .await;
+    harness.next_diagnostics_for(&uri).await;
+
+    let map = PositionMap::new(&text);
+    let offset = text.find("return match").expect("completion prefix") + 2;
+    let position = map.position_of(&text, offset);
+    let response = harness
+        .request(
+            "textDocument/completion",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": Position::new(position.line, position.character + 1),
+            })),
+        )
+        .await
+        .expect("completion");
+    let completion = response.result().expect("completion result");
+    assert!(
+        completion
+            .as_array()
+            .expect("completion array")
+            .iter()
+            .any(|item| item["label"] == "return"),
+        "keyword completion returned: {completion}"
+    );
+
+    let response = harness
+        .request(
+            "textDocument/foldingRange",
+            Some(serde_json::json!({ "textDocument": { "uri": uri } })),
+        )
+        .await
+        .expect("folding");
+    assert!(
+        response
+            .result()
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|ranges| !ranges.is_empty()),
+        "folding ranges returned: {response:?}"
+    );
+
+    harness.request("shutdown", None).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cross_file_navigation_is_served_over_lsp() {
+    let mut harness = Harness::new_at(fixtures_dir().join("imports")).await;
+    let uri = fixture_uri("imports/study.mncs");
+    let text = std::fs::read_to_string(fixtures_dir().join("imports/study.mncs"))
+        .expect("importing fixture");
+
+    harness
+        .notify(
+            "textDocument/didOpen",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri, "languageId": "mncs", "version": 1, "text": text },
+            })),
+        )
+        .await;
+    let diagnostics = harness.next_diagnostics_for(&uri).await;
+    assert_eq!(diagnostics["params"]["diagnostics"], serde_json::json!([]));
+
+    let offset = text.find("demote").expect("imported call");
+    let position = PositionMap::new(&text).position_of(&text, offset);
+    let response = harness
+        .request(
+            "textDocument/definition",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": position,
+            })),
+        )
+        .await
+        .expect("definition");
+    let definitions = response
+        .result()
+        .expect("definition result")
+        .as_array()
+        .expect("definition array");
+    assert_eq!(definitions.len(), 1);
+    assert!(definitions[0]["uri"]
+        .as_str()
+        .unwrap_or_default()
+        .ends_with("evidence.mncs"));
+
+    let response = harness
+        .request(
+            "textDocument/references",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": position,
+                "context": { "includeDeclaration": true },
+            })),
+        )
+        .await
+        .expect("references");
+    let references = response
+        .result()
+        .expect("references result")
+        .as_array()
+        .expect("references array");
+    assert!(references.iter().any(|hit| {
+        hit["uri"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("evidence.mncs")
+    }));
+    assert!(references.iter().any(|hit| {
+        hit["uri"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("study.mncs")
+    }));
 
     harness.request("shutdown", None).await.expect("shutdown");
 }

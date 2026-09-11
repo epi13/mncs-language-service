@@ -25,7 +25,7 @@ use mncs_syntax::{SourceArtifactKind, SourceEnvelope, TokenKind};
 /// words, every operator and punctuation form, both comment styles (with
 /// nesting), version and integer literals, record spread, and unicode
 /// identifiers.
-const PROBE: &str = r#"mncs 0.5;
+const PROBE: &str = r#"mncs 0.13;
 // line comment with -> => == != <= >= symbols inside
 /* block /* nested */ comment still open */ module probe.everything;
 use lib.evidence;
@@ -35,11 +35,14 @@ fn probe(alpha: i64, beta: bool) -> (result: i64)
     requires alpha_positive
     ensures result_bounded
     assumes inputs_total
+    property documented
+    invariant stable
+    metamorphic equivalent
     capability checked_integer
     effect write authorized_by ledger_mutation
 {
     let doubled: i64 = alpha + alpha * 2 - 0;
-    if beta != true {
+    if !beta != true {
         fail isolated;
     }
     if doubled >= 2 { } else { }
@@ -50,8 +53,11 @@ fn probe(alpha: i64, beta: bool) -> (result: i64)
     iterate steps up_to 3 carrying total: i64 = 0 {
         next total = total + 1;
     }
+    iterate index over pair_base carrying total: i64 = 0 {
+        next total = total + 1;
+    }
     let pair: Pair = Pair { ..pair_base, left: 1 };
-    return match beta { true => while_marker(doubled), false => 0 };
+    return match beta { true => while_marker(doubled), false => (0 as i64) };
 }
 fn évaluate(valeur: i64) -> (résultat: i64) { return valeur; }
 while
@@ -242,7 +248,10 @@ fn comments_are_scoped_as_comments() {
 
 #[test]
 fn every_supported_profile_header_is_recognized() {
-    for profile in ["0.1", "0.2", "0.3", "0.4", "0.5"] {
+    for profile in [
+        "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "0.10", "0.11", "0.12",
+        "0.13",
+    ] {
         let source = format!("mncs {profile};\nmodule t;\n");
         let tokens = authoritative_tokens(&source);
         assert!(

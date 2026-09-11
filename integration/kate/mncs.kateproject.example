@@ -1,0 +1,22 @@
+{
+  "name": "MNCS project",
+  "files": [
+    {
+      "directory": ".",
+      "filters": ["*.mncs"],
+      "recursive": 1,
+      "hidden": true
+    }
+  ],
+  "lspclient": {
+    "servers": {
+      "mncs": {
+        "command": ["mncs-lsp"],
+        "path": ["%{ENV:HOME}/.local/bin", "%{ENV:HOME}/.cargo/bin"],
+        "highlightingModeRegex": "^MNCS$",
+        "root": ".",
+        "documentLanguageId": true
+      }
+    }
+  }
+}

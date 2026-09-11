@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    MNCS syntax definition for KDE's KSyntaxHighlighting framework.
+
+    This file is intentionally a lexical presentation adapter. The
+    authoritative lexer lives in mncs-language; keep the keyword inventory
+    synchronized with crates/static-syntax/src/scopes.rs and its conformance
+    tests.
+-->
+<language name="MNCS" version="1" kateversion="5.62" section="Sources"
+          extensions="*.mncs" mimetype="text/x-mncs" priority="15"
+          author="MNCS contributors" license="Apache-2.0" casesensitive="true">
+  <highlighting>
+    <list name="keywords">
+      <item>mncs</item>
+      <item>module</item>
+      <item>fn</item>
+      <item>return</item>
+      <item>let</item>
+      <item>if</item>
+      <item>else</item>
+      <item>fail</item>
+      <item>requires</item>
+      <item>ensures</item>
+      <item>assumes</item>
+      <item>property</item>
+      <item>invariant</item>
+      <item>metamorphic</item>
+      <item>effect</item>
+      <item>capability</item>
+      <item>authorized_by</item>
+      <item>enum</item>
+      <item>use</item>
+      <item>record</item>
+      <item>match</item>
+      <item>iterate</item>
+      <item>up_to</item>
+      <item>carrying</item>
+      <item>next</item>
+      <item>over</item>
+      <item>as</item>
+      <item>while</item>
+    </list>
+    <list name="types">
+      <item>bool</item>
+      <item>byte</item>
+      <item>bit</item>
+      <item>i8</item>
+      <item>u8</item>
+      <item>i16</item>
+      <item>u16</item>
+      <item>i32</item>
+      <item>u32</item>
+      <item>i64</item>
+      <item>u64</item>
+      <item>i128</item>
+      <item>u128</item>
+      <item>f64</item>
+      <item>Type</item>
+      <item>Nat</item>
+      <item>vec</item>
+      <item>mask</item>
+    </list>
+    <list name="literals">
+      <item>true</item>
+      <item>false</item>
+    </list>
+    <contexts>
+      <context name="Normal" attribute="Normal" lineEndContext="#stay">
+        <DetectSpaces/>
+        <Detect2Chars char="/" char1="/" attribute="Comment" context="LineComment"/>
+        <Detect2Chars char="/" char1="*" attribute="Comment" context="BlockComment"/>
+
+        <!-- Keep declaration names legible without pretending to resolve them. -->
+        <WordDetect String="module" attribute="Keyword" context="ModuleName"/>
+        <WordDetect String="fn" attribute="Keyword" context="FunctionName"/>
+        <WordDetect String="enum" attribute="Keyword" context="TypeName"/>
+        <WordDetect String="record" attribute="Keyword" context="TypeName"/>
+        <WordDetect String="let" attribute="Keyword" context="BindingName"/>
+
+        <keyword String="keywords" attribute="Keyword" context="#stay"/>
+        <keyword String="types" attribute="Type" context="#stay"/>
+        <keyword String="literals" attribute="Constant" context="#stay"/>
+
+        <!-- Numeric forms currently emitted by mncs-language's lexer. -->
+        <RegExpr String="\b[0-9]+\.[0-9]+\b" attribute="Float" context="#stay"/>
+        <RegExpr String="\b[0-9]+\b" attribute="Decimal" context="#stay"/>
+
+        <!-- Calls are lexical; authoritative resolution remains an LSP job. -->
+        <RegExpr String="\b[_\p{L}][_\p{L}\p{N}]*(?=\s*\()" attribute="Function" context="#stay"/>
+        <RegExpr String="\b[A-Z][_\p{L}\p{N}]*\b" attribute="Type" context="#stay"/>
+
+        <!-- Longest operators first, matching the authoritative lexer. -->
+        <RegExpr String="(->|=>|==|!=|<=|>=|<<|>>|&&|\|\||\.\.|\+%|-%|\*%|\+\||-\||\*\|)" attribute="Operator" context="#stay"/>
+        <AnyChar String="+-*/%&amp;|^!<>=" attribute="Operator" context="#stay"/>
+
+        <DetectChar char=":" attribute="Punctuation" context="#stay"/>
+        <DetectChar char=";" attribute="Punctuation" context="#stay"/>
+        <DetectChar char="," attribute="Punctuation" context="#stay"/>
+        <DetectChar char="." attribute="Punctuation" context="#stay"/>
+        <DetectChar char="(" attribute="Punctuation" context="#stay"/>
+        <DetectChar char=")" attribute="Punctuation" context="#stay"/>
+        <DetectChar char="[" attribute="Punctuation" context="#stay" beginRegion="bracket"/>
+        <DetectChar char="]" attribute="Punctuation" context="#stay" endRegion="bracket"/>
+        <DetectChar char="{" attribute="Punctuation" context="#stay" beginRegion="brace"/>
+        <DetectChar char="}" attribute="Punctuation" context="#stay" endRegion="brace"/>
+        <DetectIdentifier/>
+      </context>
+
+      <context name="LineComment" attribute="Comment" lineEndContext="#pop">
+        <DetectIdentifier attribute="Comment"/>
+      </context>
+
+      <context name="BlockComment" attribute="Comment" lineEndContext="#stay">
+        <Detect2Chars char="/" char1="*" attribute="Comment" context="BlockComment"/>
+        <Detect2Chars char="*" char1="/" attribute="Comment" context="#pop"/>
+        <DetectSpaces attribute="Comment"/>
+        <DetectIdentifier attribute="Comment"/>
+      </context>
+
+      <context name="ModuleName" attribute="Normal" lineEndContext="#pop">
+        <DetectSpaces/>
+        <RegExpr String="(?:mncs|[_\p{L}][_\p{L}\p{N}]*)(?:\.(?:mncs|[_\p{L}][_\p{L}\p{N}]*))*" attribute="Namespace" context="#pop"/>
+      </context>
+
+      <context name="FunctionName" attribute="Normal" lineEndContext="#pop">
+        <DetectSpaces/>
+        <RegExpr String="[_\p{L}][_\p{L}\p{N}]*" attribute="Function" context="#pop"/>
+      </context>
+
+      <context name="TypeName" attribute="Normal" lineEndContext="#pop">
+        <DetectSpaces/>
+        <RegExpr String="[_\p{L}][_\p{L}\p{N}]*" attribute="Type" context="#pop"/>
+      </context>
+
+      <context name="BindingName" attribute="Normal" lineEndContext="#pop">
+        <DetectSpaces/>
+        <RegExpr String="[_\p{L}][_\p{L}\p{N}]*" attribute="Variable" context="#pop"/>
+      </context>
+    </contexts>
+    <itemDatas>
+      <!-- These are semantic default styles, never hard-coded colors. -->
+      <itemData name="Normal" defStyleNum="dsNormal" spellChecking="false"/>
+      <itemData name="Keyword" defStyleNum="dsKeyword" spellChecking="false"/>
+      <itemData name="Type" defStyleNum="dsDataType" spellChecking="false"/>
+      <itemData name="Function" defStyleNum="dsFunction" spellChecking="false"/>
+      <itemData name="Variable" defStyleNum="dsVariable" spellChecking="false"/>
+      <itemData name="Namespace" defStyleNum="dsNamespace" spellChecking="false"/>
+      <itemData name="Constant" defStyleNum="dsConstant" spellChecking="false"/>
+      <itemData name="Decimal" defStyleNum="dsDecVal" spellChecking="false"/>
+      <itemData name="Float" defStyleNum="dsFloat" spellChecking="false"/>
+      <itemData name="Operator" defStyleNum="dsOperator" spellChecking="false"/>
+      <itemData name="Punctuation" defStyleNum="dsOthers" spellChecking="false"/>
+      <itemData name="Comment" defStyleNum="dsComment" spellChecking="true"/>
+    </itemDatas>
+  </highlighting>
+  <general>
+    <comments>
+      <comment name="singleLine" start="//"/>
+      <comment name="multiLine" start="/*" end="*/"/>
+    </comments>
+    <keywords casesensitive="true"/>
+  </general>
+</language>

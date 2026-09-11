@@ -333,6 +333,8 @@ pub(crate) fn execute_status_summary(
         arguments,
         step_budget: STEP_BUDGET,
         policy: Default::default(),
+        host_grants: Vec::new(),
+        call_depth_budget: None,
     };
     let execution = execute_backend(&kernel.artifact, &request);
     if execution.status != ExecutionStatus::Returned || execution.returned.len() != 1 {

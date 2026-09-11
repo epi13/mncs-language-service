@@ -346,6 +346,15 @@
                     "include": "#contract-assumes"
                 },
                 {
+                    "include": "#contract-property"
+                },
+                {
+                    "include": "#contract-invariant"
+                },
+                {
+                    "include": "#contract-metamorphic"
+                },
+                {
                     "include": "#capability-declaration"
                 },
                 {
@@ -389,6 +398,9 @@
                     "include": "#block-comment"
                 },
                 {
+                    "include": "#iteration-over-header"
+                },
+                {
                     "include": "#iteration-header"
                 },
                 {
@@ -405,6 +417,15 @@
                 },
                 {
                     "include": "#contract-assumes"
+                },
+                {
+                    "include": "#contract-property"
+                },
+                {
+                    "include": "#contract-invariant"
+                },
+                {
+                    "include": "#contract-metamorphic"
                 },
                 {
                     "include": "#capability-declaration"
@@ -470,6 +491,15 @@
                     "include": "#operator-logical"
                 },
                 {
+                    "include": "#operator-bitwise"
+                },
+                {
+                    "include": "#operator-unary"
+                },
+                {
+                    "include": "#operator-conversion"
+                },
+                {
                     "include": "#reserved-keywords-control"
                 },
                 {
@@ -500,6 +530,12 @@
                     "include": "#punctuation-brace-close"
                 },
                 {
+                    "include": "#punctuation-bracket-open"
+                },
+                {
+                    "include": "#punctuation-bracket-close"
+                },
+                {
                     "include": "#punctuation-stray-dot"
                 },
                 {
@@ -521,6 +557,38 @@
                 },
                 "4": {
                     "name": "constant.numeric.integer.mncs"
+                },
+                "5": {
+                    "name": "keyword.control.iteration.carrying.mncs"
+                },
+                "6": {
+                    "name": "variable.name.mncs"
+                },
+                "7": {
+                    "name": "punctuation.separator.colon.mncs"
+                },
+                "8": {
+                    "name": "entity.name.type.mncs"
+                },
+                "9": {
+                    "name": "keyword.operator.assignment.mncs"
+                }
+            }
+        },
+        "iteration-over-header": {
+            "match": "\\b(iterate)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)\\s+(over)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)\\s+(carrying)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(:)\\s*([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(=)",
+            "captures": {
+                "1": {
+                    "name": "keyword.control.iteration.iterate.mncs"
+                },
+                "2": {
+                    "name": "variable.name.mncs"
+                },
+                "3": {
+                    "name": "keyword.control.iteration.over.mncs"
+                },
+                "4": {
+                    "name": "variable.name.mncs"
                 },
                 "5": {
                     "name": "keyword.control.iteration.carrying.mncs"
@@ -586,6 +654,39 @@
             "captures": {
                 "1": {
                     "name": "keyword.control.contract.assumes.mncs"
+                },
+                "2": {
+                    "name": "entity.name.contract.mncs"
+                }
+            }
+        },
+        "contract-property": {
+            "match": "\\b(property)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)",
+            "captures": {
+                "1": {
+                    "name": "keyword.control.contract.property.mncs"
+                },
+                "2": {
+                    "name": "entity.name.contract.mncs"
+                }
+            }
+        },
+        "contract-invariant": {
+            "match": "\\b(invariant)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)",
+            "captures": {
+                "1": {
+                    "name": "keyword.control.contract.invariant.mncs"
+                },
+                "2": {
+                    "name": "entity.name.contract.mncs"
+                }
+            }
+        },
+        "contract-metamorphic": {
+            "match": "\\b(metamorphic)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)",
+            "captures": {
+                "1": {
+                    "name": "keyword.control.contract.metamorphic.mncs"
                 },
                 "2": {
                     "name": "entity.name.contract.mncs"
@@ -783,19 +884,31 @@
             "name": "keyword.operator.assignment.mncs"
         },
         "operator-arithmetic": {
-            "match": "[*/%+-]",
+            "match": "(\\+%|-%|\\*%|\\+\\||-\\||\\*\\||[*/%+-])",
             "name": "keyword.operator.arithmetic.mncs"
         },
         "operator-logical": {
             "match": "(&&|\\|\\|)",
             "name": "keyword.operator.logical.mncs"
         },
+        "operator-bitwise": {
+            "match": "(<<|>>|&|\\||\\^)",
+            "name": "keyword.operator.bitwise.mncs"
+        },
+        "operator-unary": {
+            "match": "!",
+            "name": "keyword.operator.unary.mncs"
+        },
+        "operator-conversion": {
+            "match": "\\bas\\b",
+            "name": "keyword.operator.conversion.mncs"
+        },
         "reserved-keywords-control": {
             "match": "\\b(if|else|return|fail|match|while|next)\\b",
             "name": "keyword.control.flow.mncs"
         },
         "reserved-keywords-iteration": {
-            "match": "\\b(iterate|up_to|carrying)\\b",
+            "match": "\\b(iterate|up_to|carrying|over)\\b",
             "name": "keyword.control.iteration.mncs"
         },
         "reserved-keywords-declaration": {
@@ -803,7 +916,7 @@
             "name": "keyword.declaration.mncs"
         },
         "reserved-keywords-misc": {
-            "match": "\\b(mncs|authorized_by|requires|ensures|assumes)\\b",
+            "match": "\\b(mncs|authorized_by|requires|ensures|assumes|property|invariant|metamorphic|as)\\b",
             "name": "keyword.other.mncs"
         },
         "punctuation-colon": {
@@ -829,6 +942,14 @@
         "punctuation-brace-close": {
             "match": "\\}",
             "name": "punctuation.section.block.end.mncs"
+        },
+        "punctuation-bracket-open": {
+            "match": "\\[",
+            "name": "punctuation.section.brackets.begin.mncs"
+        },
+        "punctuation-bracket-close": {
+            "match": "\\]",
+            "name": "punctuation.section.brackets.end.mncs"
         },
         "punctuation-stray-dot": {
             "match": "\\.",

@@ -144,9 +144,16 @@ fn fixture(rel: &str) -> String {
 }
 
 fn sample(name: &str) -> String {
-    let path = repo_root()
+    let corpus_path = repo_root()
         .join("integration/github-linguist/samples")
         .join(name);
+    let path = if corpus_path.exists() {
+        corpus_path
+    } else {
+        repo_root()
+            .join("integration/static-syntax/samples")
+            .join(name)
+    };
     std::fs::read_to_string(path).expect("sample readable")
 }
 
@@ -456,8 +463,8 @@ fn unicode_identifiers_tokenize() {
 }
 
 // ---------------------------------------------------------------------------
-// Ecosystem corpus: every curated Linguist sample must tokenize with sane
-// classifications end-to-end.
+// Ecosystem corpus and current-profile surface fixture: every sample must
+// tokenize with sane classifications end-to-end.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -524,6 +531,18 @@ fn every_curated_sample_tokenizes_with_expected_landmarks() {
                 "entity.name.variant.mncs",
             ],
             &["requires"],
+        ),
+        (
+            "current-profile.mncs",
+            &[
+                "keyword.control.contract.property.mncs",
+                "keyword.control.contract.invariant.mncs",
+                "keyword.control.contract.metamorphic.mncs",
+                "keyword.control.iteration.over.mncs",
+                "keyword.operator.conversion.mncs",
+                "keyword.operator.unary.mncs",
+            ],
+            &["mncs 0.13", "accumulate", "Pair"],
         ),
     ];
     for (name, prefixes, landmark_needles) in cases {

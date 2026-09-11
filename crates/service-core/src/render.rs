@@ -12,7 +12,7 @@ use crate::analysis::DocumentAnalysis;
 use crate::indexes::{self, SymbolKind};
 use crate::queries::{CompletionCandidate, CompletionClass, TokenAnnotation, TokenClass};
 
-pub(crate) const KEYWORDS: [&str; 24] = [
+pub(crate) const KEYWORDS: [&str; 30] = [
     "mncs",
     "module",
     "fn",
@@ -24,16 +24,22 @@ pub(crate) const KEYWORDS: [&str; 24] = [
     "requires",
     "ensures",
     "assumes",
+    "property",
+    "invariant",
+    "metamorphic",
     "effect",
     "capability",
     "authorized_by",
     "enum",
+    "use",
     "record",
     "match",
     "iterate",
     "up_to",
     "carrying",
     "next",
+    "over",
+    "as",
     "while",
     "true",
     "false",
@@ -239,6 +245,8 @@ fn contract_kind(kind: &mncs_model::ContractKind) -> &'static str {
         mncs_model::ContractKind::Invariant => "invariant",
         mncs_model::ContractKind::Preserves => "preserves",
         mncs_model::ContractKind::Budget => "budget",
+        mncs_model::ContractKind::Property => "property",
+        mncs_model::ContractKind::Metamorphic => "metamorphic",
     }
 }
 
@@ -260,7 +268,7 @@ pub(crate) fn compute_semantic_tokens(snapshot: &DocumentAnalysis) -> Vec<TokenA
 
     for (position, token) in significant.iter().enumerate() {
         let class = match token.kind {
-            TokenKind::IntegerLiteral => Some(TokenClass::Number),
+            TokenKind::IntegerLiteral | TokenKind::Version => Some(TokenClass::Number),
             kind if is_keyword_token(kind) => Some(TokenClass::Keyword),
             TokenKind::Identifier => classify_identifier(snapshot, position, &significant, token),
             _ => None,
@@ -292,16 +300,22 @@ fn is_keyword_token(kind: TokenKind) -> bool {
             | TokenKind::RequiresKeyword
             | TokenKind::EnsuresKeyword
             | TokenKind::AssumesKeyword
+            | TokenKind::PropertyKeyword
+            | TokenKind::InvariantKeyword
+            | TokenKind::MetamorphicKeyword
             | TokenKind::EffectKeyword
             | TokenKind::CapabilityKeyword
             | TokenKind::AuthorizedKeyword
             | TokenKind::EnumKeyword
+            | TokenKind::UseKeyword
             | TokenKind::RecordKeyword
             | TokenKind::MatchKeyword
             | TokenKind::IterateKeyword
             | TokenKind::UpToKeyword
             | TokenKind::CarryingKeyword
             | TokenKind::NextKeyword
+            | TokenKind::OverKeyword
+            | TokenKind::AsKeyword
             | TokenKind::WhileKeyword
             | TokenKind::TrueKeyword
             | TokenKind::FalseKeyword

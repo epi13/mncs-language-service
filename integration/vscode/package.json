@@ -1,0 +1,70 @@
+{
+  "name": "mncs-language-support",
+  "displayName": "MNCS Language Support",
+  "description": "MNCS syntax highlighting and Language Server Protocol support",
+  "version": "0.1.0",
+  "publisher": "epi13",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/epi13/mncs-language-service.git"
+  },
+  "engines": {
+    "vscode": ">=1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:mncs"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "mncs",
+        "aliases": [
+          "MNCS",
+          "mncs"
+        ],
+        "extensions": [
+          ".mncs"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "mncs",
+        "scopeName": "source.mncs",
+        "path": "./syntaxes/mncs.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "MNCS",
+      "properties": {
+        "mncs.languageServer.command": {
+          "type": "string",
+          "default": "mncs-lsp",
+          "description": "Command or absolute path used to start mncs-lsp. MNCS_LSP and standard user-local bin directories are also checked."
+        },
+        "mncs.languageServer.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional arguments passed to mncs-lsp."
+        },
+        "mncs.languageServer.env": {
+          "type": "object",
+          "default": {},
+          "description": "Additional environment variables passed to mncs-lsp, for example MNCS_LIBRARY_PATH."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

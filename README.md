@@ -127,7 +127,8 @@ crates/
   lsp/              LSP adapter binary (tower-lsp)
   mcp/              MCP adapter binary (rmcp), read-only tools
 integration/        third-party integration assets (TextMate grammar package,
-                    GitHub/Linguist readiness kit) — see integration/README.md
+                    KDE/KWrite/Kate and VS Code adapters, GitHub/Linguist
+                    readiness kit) — see integration/README.md
 tests/fixtures/     representative MNCS sources shared by all test levels
 mncs/               service-specific MNCS query modules executed through
                     the authoritative compiler/backend
@@ -154,7 +155,7 @@ MNLS_WORKSPACE_ROOT=/path/to/mncs/workspace cargo run -p mncs-lsp
 For a stable installed command, install the LSP binary from this repository:
 
 ```bash
-cargo install --path crates/lsp --locked --bin mncs-lsp
+cargo install --path crates/lsp --locked --bin mncs-lsp --root "$HOME/.local"
 ```
 
 The installed executable is `mncs-lsp`. It speaks standard Language Server
@@ -162,6 +163,51 @@ Protocol over stdin/stdout; diagnostics and logs are sent through the LSP
 transport or client logging channel, never as ad-hoc stdout text. Clients may
 provide the workspace root during `initialize`; `MNLS_WORKSPACE_ROOT` is an
 optional fallback for clients that do not send one.
+
+### Fedora editor integration
+
+The repository includes reproducible editor assets under
+[`integration/`](integration/README.md). The canonical static grammar is
+shared with the KDE and VS Code adapters; the resident LSP remains the source
+of semantic answers.
+
+Install the current-user KDE syntax definition for KWrite and Kate:
+
+```bash
+integration/kde/install.sh
+```
+
+KWrite gets syntax highlighting through KSyntaxHighlighting. Kate gets the
+same highlighting plus LSP features when its LSP Client plugin is enabled;
+copy [`integration/kate/mncs.kateproject.example`](integration/kate/mncs.kateproject.example)
+to a project as `.kateproject` and ensure
+`mncs-lsp` is on PATH. The project file uses the executable name rather than a
+machine-specific path, so the Cargo-installed binary at
+`$HOME/.local/bin/mncs-lsp` works when that directory is in PATH.
+
+Package and install the thin VS Code adapter:
+
+```bash
+integration/vscode/install.sh
+```
+
+The extension contributes `*.mncs` syntax presentation and starts the real
+`mncs-lsp` process. Set `mncs.languageServer.command` or `MNCS_LSP` only when
+the executable is outside the resolver's standard user-local locations.
+
+The current authoritative lexer has no string-literal token, so the bundled
+grammars intentionally do not invent quoted-string highlighting. The service
+currently advertises full synchronization, diagnostics, hover, definition,
+references, document/workspace symbols, semantic tokens, completion,
+highlights, and folding. Rename, code actions, formatting, signature help,
+and inlay hints remain unsupported.
+
+Semantic tokens intentionally stay within the standard editor vocabulary:
+resolved functions, parameters, variables, types, enum members, properties,
+namespaces, keywords, and numbers. Contracts, effects, capabilities,
+assumptions, evidence, obligations, and verification states remain keyword /
+identifier presentation or structured diagnostics and obligation responses;
+they are not forced into misleading custom token types.
 
 ### OpenCode
 

@@ -30,6 +30,9 @@ pub const KEYWORD_SPELLINGS: &[(&str, TokenKind)] = &[
     ("requires", TokenKind::RequiresKeyword),
     ("ensures", TokenKind::EnsuresKeyword),
     ("assumes", TokenKind::AssumesKeyword),
+    ("property", TokenKind::PropertyKeyword),
+    ("invariant", TokenKind::InvariantKeyword),
+    ("metamorphic", TokenKind::MetamorphicKeyword),
     ("effect", TokenKind::EffectKeyword),
     ("capability", TokenKind::CapabilityKeyword),
     ("authorized_by", TokenKind::AuthorizedKeyword),
@@ -41,6 +44,8 @@ pub const KEYWORD_SPELLINGS: &[(&str, TokenKind)] = &[
     ("up_to", TokenKind::UpToKeyword),
     ("carrying", TokenKind::CarryingKeyword),
     ("next", TokenKind::NextKeyword),
+    ("over", TokenKind::OverKeyword),
+    ("as", TokenKind::AsKeyword),
     ("while", TokenKind::WhileKeyword),
     ("true", TokenKind::TrueKeyword),
     ("false", TokenKind::FalseKeyword),
@@ -63,6 +68,9 @@ pub fn is_keyword_kind(kind: TokenKind) -> bool {
             | TokenKind::RequiresKeyword
             | TokenKind::EnsuresKeyword
             | TokenKind::AssumesKeyword
+            | TokenKind::PropertyKeyword
+            | TokenKind::InvariantKeyword
+            | TokenKind::MetamorphicKeyword
             | TokenKind::EffectKeyword
             | TokenKind::CapabilityKeyword
             | TokenKind::AuthorizedKeyword
@@ -74,6 +82,8 @@ pub fn is_keyword_kind(kind: TokenKind) -> bool {
             | TokenKind::UpToKeyword
             | TokenKind::CarryingKeyword
             | TokenKind::NextKeyword
+            | TokenKind::OverKeyword
+            | TokenKind::AsKeyword
             | TokenKind::WhileKeyword
             | TokenKind::TrueKeyword
             | TokenKind::FalseKeyword
@@ -105,6 +115,9 @@ pub fn expected_scope(kind: TokenKind) -> &'static str {
         TokenKind::RequiresKeyword => "keyword.control.contract.requires.mncs",
         TokenKind::EnsuresKeyword => "keyword.control.contract.ensures.mncs",
         TokenKind::AssumesKeyword => "keyword.control.contract.assumes.mncs",
+        TokenKind::PropertyKeyword => "keyword.control.contract.property.mncs",
+        TokenKind::InvariantKeyword => "keyword.control.contract.invariant.mncs",
+        TokenKind::MetamorphicKeyword => "keyword.control.contract.metamorphic.mncs",
         TokenKind::EffectKeyword => "keyword.declaration.effect.mncs",
         TokenKind::CapabilityKeyword => "keyword.declaration.capability.mncs",
         TokenKind::AuthorizedKeyword => "keyword.control.authorized-by.mncs",
@@ -143,6 +156,7 @@ pub fn expected_scope(kind: TokenKind) -> &'static str {
         | TokenKind::Caret
         | TokenKind::Shl
         | TokenKind::Shr => "keyword.operator.bitwise.mncs",
+        TokenKind::Not => "keyword.operator.unary.mncs",
         TokenKind::EqEq
         | TokenKind::NotEq
         | TokenKind::Lt

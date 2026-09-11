@@ -1,0 +1,26 @@
+// Source Profile 0.13 editor-surface sample. The service treats this as a
+// lexical fixture so a presentation adapter remains useful while a document
+// is incomplete or still being authored.
+mncs 0.13;
+module examples.editor_surface;
+
+use examples.records as records;
+
+record Pair { left: i64, right: i64 }
+enum Verdict { Pass, Fail }
+
+fn accumulate<N: Nat>(values: [i64; N], active: bool) -> (result: i64)
+    property law_accumulate
+    invariant law_accumulate
+    metamorphic law_accumulate
+{
+    let seed: i64 = (1 as i64);
+    iterate i over values carrying total: i64 = seed {
+        next total = total +% values[i];
+    }
+    if !active {
+        return 0;
+    } else {
+        return total;
+    }
+}
