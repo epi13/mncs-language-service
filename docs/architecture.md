@@ -221,15 +221,27 @@ crates/
       coords      byte ↔ line/UTF-16 position mapping (single authority)
       document    DocumentStore: workspace discovery, open buffers vs disk,
                   save/close lifecycle, content fingerprints via envelope identity
+      edits       incremental TextChange application (LSP ranges → exact text)
       analysis    DocumentAnalysis: immutable snapshot binding source identity +
                   generation → SourceFrontEndResult + position map + symbol index
       indexes     SymbolIndex: declarations (AST), references (authoritative
                   NameResolutionIndex), identities/signatures (elaborated Program)
-      queries     LanguageService: protocol-neutral query layer and response types
+      queries     LanguageService: workspace state, snapshots, base queries,
+                  diagnostics with owned-location related entries, native kernels
+      intel       signature help, declaration/type definition, selection ranges,
+                  call hierarchy, inlay hints (impl LanguageService)
+      rename      semantic rename → workspace FileEdits (validation, collisions)
+      format      deterministic idempotent formatting (document + range)
+      actions     missing-import quickfixes grounded in MNE131
+      native_query / native_filter
+                  MNCS-native kernel boundary adapters (status, kind filter)
       render      shared hover markdown, semantic-token classification, completion
 
   lsp/            mncs-lsp binary — tower-lsp projection of the core
   mcp/            mncs-mcp binary — rmcp projection (read-only tools)
+
+mncs/             service-owned MNCS query sources (status_query, filter_query)
+pressure/         language-pressure ledger (LS-P-001…): reproducer, class, cost
 ```
 
 Dependency direction is strictly one-way: adapters → core → `mncs-language`.

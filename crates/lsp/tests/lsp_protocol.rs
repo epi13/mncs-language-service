@@ -579,6 +579,355 @@ impl Drop for StdioClient {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn incremental_edits_update_analysis_without_full_resend() {
+    let mut harness = Harness::new().await;
+    let uri = fixture_uri("valid-contracts.mncs");
+    let disk_text =
+        std::fs::read_to_string(fixtures_dir().join("valid-contracts.mncs")).expect("fixture");
+    harness
+        .notify(
+            "textDocument/didOpen",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri, "languageId": "mncs", "version": 1, "text": disk_text },
+            })),
+        )
+        .await;
+    let published = harness.next_diagnostics_for(&uri).await;
+    assert_eq!(published["params"]["diagnostics"], serde_json::json!([]));
+
+    // Incremental insertion of one character breaks the call target; only the
+    // ranged edit travels, not the whole document.
+    let map = PositionMap::new(&disk_text);
+    let call = disk_text.rfind("bounded_step").expect("call site");
+    let info = map.position_of(&disk_text, call);
+    harness
+        .notify(
+            "textDocument/didChange",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [{
+                    "range": {
+                        "start": { "line": info.line, "character": info.character },
+                        "end": { "line": info.line, "character": info.character },
+                    },
+                    "text": "x",
+                }],
+            })),
+        )
+        .await;
+    let published = harness.next_diagnostics_for(&uri).await;
+    let diagnostics = published["params"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert!(
+        diagnostics.iter().any(|item| item["code"] == "MNE131"),
+        "incremental edit re-analyzed: {diagnostics:?}"
+    );
+
+    // Removing the character incrementally heals the document.
+    harness
+        .notify(
+            "textDocument/didChange",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri, "version": 3 },
+                "contentChanges": [{
+                    "range": {
+                        "start": { "line": info.line, "character": info.character },
+                        "end": { "line": info.line, "character": info.character + 1 },
+                    },
+                    "text": "",
+                }],
+            })),
+        )
+        .await;
+    let published = harness.next_diagnostics_for(&uri).await;
+    assert_eq!(published["params"]["diagnostics"], serde_json::json!([]));
+
+    harness.request("shutdown", None).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn signature_help_declaration_type_definition_flow() {
+    let mut harness = Harness::new().await;
+    let uri = fixture_uri("valid-contracts.mncs");
+    let text =
+        std::fs::read_to_string(fixtures_dir().join("valid-contracts.mncs")).expect("fixture");
+    harness
+        .notify(
+            "textDocument/didOpen",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri, "languageId": "mncs", "version": 1, "text": text },
+            })),
+        )
+        .await;
+    harness.next_diagnostics_for(&uri).await;
+
+    // Signature help on the second call argument.
+    let call = text.rfind("bounded_step(value, value)").expect("call");
+    let second = call + "bounded_step(value, ".len();
+    let position = PositionMap::new(&text).position_of(&text, second);
+    let response = harness
+        .request(
+            "textDocument/signatureHelp",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": Position::new(position.line, position.character),
+            })),
+        )
+        .await
+        .expect("signature help");
+    let help = response.result().expect("result").clone();
+    assert_eq!(help["activeParameter"], 1);
+    assert!(help["signatures"][0]["label"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("fn bounded_step"));
+
+    // Declaration resolves like definition for this single-site language.
+    let call_name = text.rfind("bounded_step").expect("call site");
+    let position = PositionMap::new(&text).position_of(&text, call_name);
+    let response = harness
+        .request(
+            "textDocument/declaration",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": Position::new(position.line, position.character),
+            })),
+        )
+        .await
+        .expect("declaration");
+    let locations = response
+        .result()
+        .expect("result")
+        .as_array()
+        .expect("array")
+        .clone();
+    assert_eq!(locations.len(), 1);
+
+    // Type definition of a builtin-typed binding is honestly empty.
+    let binding = text.find("let next: i64").expect("binding") + 4;
+    let position = PositionMap::new(&text).position_of(&text, binding);
+    let response = harness
+        .request(
+            "textDocument/typeDefinition",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": Position::new(position.line, position.character),
+            })),
+        )
+        .await
+        .expect("type definition");
+    assert_null_result(&response, "builtin type has no definition site");
+
+    harness.request("shutdown", None).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rename_selection_hierarchy_hints_actions_formatting_flow() {
+    let mut harness = Harness::new().await;
+    let uri = fixture_uri("records.mncs");
+    let text = std::fs::read_to_string(fixtures_dir().join("records.mncs")).expect("fixture");
+    harness
+        .notify(
+            "textDocument/didOpen",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri, "languageId": "mncs", "version": 1, "text": text },
+            })),
+        )
+        .await;
+    harness.next_diagnostics_for(&uri).await;
+    let map = PositionMap::new(&text);
+
+    // Rename the record type: declaration + constructor + annotations move.
+    let decl = text.find("record Reading").expect("decl") + "record ".len();
+    let position = map.position_of(&text, decl);
+    let response = harness
+        .request(
+            "textDocument/rename",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": Position::new(position.line, position.character),
+                "newName": "Sample",
+            })),
+        )
+        .await
+        .expect("rename");
+    let edit = response.result().expect("rename edit").clone();
+    let files = edit["changes"].as_object().expect("changes");
+    assert_eq!(files.len(), 1);
+    let file_edits = files[&uri].as_array().expect("edits");
+    assert!(file_edits.len() >= 3, "decl + uses: {file_edits:?}");
+
+    // Renaming to a keyword is a protocol error, not silent success.
+    let response = harness
+        .request(
+            "textDocument/rename",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": Position::new(position.line, position.character),
+                "newName": "fn",
+            })),
+        )
+        .await
+        .expect("rename refusal");
+    assert!(response.error().is_some(), "{response:?}");
+
+    // Selection ranges nest innermost-first.
+    let at = text.find("celsius: i32").expect("field") + 2;
+    let position = map.position_of(&text, at);
+    let response = harness
+        .request(
+            "textDocument/selectionRange",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "positions": [Position::new(position.line, position.character)],
+            })),
+        )
+        .await
+        .expect("selection range");
+    let ranges = response
+        .result()
+        .expect("result")
+        .as_array()
+        .expect("array")
+        .clone();
+    assert_eq!(ranges.len(), 1);
+    let mut depth = 0;
+    let mut cursor = &ranges[0];
+    loop {
+        depth += 1;
+        match cursor.get("parent") {
+            Some(parent) if !parent.is_null() => cursor = parent,
+            _ => break,
+        }
+    }
+    assert!(depth >= 3, "expected nesting, got {depth}");
+
+    // Call hierarchy: prepare on `adjust`, then outgoing (none) and incoming.
+    let adjust = text.find("fn adjust").expect("fn") + 3;
+    let position = map.position_of(&text, adjust);
+    let response = harness
+        .request(
+            "textDocument/prepareCallHierarchy",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": Position::new(position.line, position.character),
+            })),
+        )
+        .await
+        .expect("prepare");
+    let items = response
+        .result()
+        .expect("result")
+        .as_array()
+        .expect("array")
+        .clone();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["name"], "adjust");
+    let response = harness
+        .request(
+            "callHierarchy/outgoingCalls",
+            Some(serde_json::json!({ "item": items[0] })),
+        )
+        .await
+        .expect("outgoing");
+    assert!(response
+        .result()
+        .expect("result")
+        .as_array()
+        .expect("array")
+        .is_empty());
+
+    // Inlay hints serve the whole file without error.
+    let response = harness
+        .request(
+            "textDocument/inlayHint",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 100, "character": 0 },
+                },
+            })),
+        )
+        .await
+        .expect("inlay hints");
+    assert!(response.result().is_some());
+
+    // Formatting a canonical fixture yields no edits.
+    let response = harness
+        .request(
+            "textDocument/formatting",
+            Some(serde_json::json!({
+                "textDocument": { "uri": uri },
+                "options": { "tabSize": 4, "insertSpaces": true },
+            })),
+        )
+        .await
+        .expect("formatting");
+    assert_null_result(&response, "canonical fixture needs no formatting");
+
+    harness.request("shutdown", None).await.expect("shutdown");
+}
+
+/// A `null` JSON-RPC result still presents as `Some(Null)`.
+fn assert_null_result(response: &tower_lsp::jsonrpc::Response, context: &str) {
+    assert_eq!(
+        response.result(),
+        Some(&serde_json::Value::Null),
+        "{context}: {response:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn capabilities_advertise_second_wave_methods() {
+    let (service, _socket) =
+        mncs_lsp::create_service(Some(fixtures_dir().canonicalize().expect("root")));
+    use tower::Service as _;
+    use tower::ServiceExt as _;
+    let request = tower_lsp::jsonrpc::Request::build("initialize".to_owned())
+        .params(serde_json::json!({
+            "processId": std::process::id(),
+            "rootUri": format!("file://{}", fixtures_dir().canonicalize().expect("root").display()),
+            "capabilities": {},
+        }))
+        .id(1)
+        .finish();
+    let mut service = service;
+    let response = service
+        .ready()
+        .await
+        .expect("ready")
+        .call(request)
+        .await
+        .expect("call")
+        .expect("response");
+    let value = serde_json::to_value(response.result().expect("result")).expect("json");
+    let capabilities = &value["capabilities"];
+    for provider in [
+        "signatureHelpProvider",
+        "declarationProvider",
+        "typeDefinitionProvider",
+        "renameProvider",
+        "documentFormattingProvider",
+        "documentRangeFormattingProvider",
+        "selectionRangeProvider",
+        "callHierarchyProvider",
+        "inlayHintProvider",
+        "codeActionProvider",
+    ] {
+        assert!(
+            !capabilities[provider].is_null(),
+            "missing advertised provider {provider}"
+        );
+    }
+    assert_eq!(
+        capabilities["textDocumentSync"], 2,
+        "incremental sync must be advertised"
+    );
+}
+
 #[test]
 fn real_stdio_transport_publishes_diagnostics() {
     let mut client = StdioClient::start();

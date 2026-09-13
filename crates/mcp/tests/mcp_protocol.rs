@@ -257,6 +257,38 @@ async fn native_obligations_executes_through_the_real_tool_surface() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn native_kind_count_executes_through_the_real_tool_surface() {
+    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language/library");
+    if !library.join("core/sequences.mncs").is_file() {
+        return;
+    }
+    std::env::set_var("MNCS_LIBRARY_PATH", library);
+
+    let harness = spawn_server().await;
+    let result = call(
+        &harness.peer,
+        "native_kind_count".to_owned(),
+        serde_json::json!({ "uri": uri_for("records.mncs"), "wanted_kind": "function" }),
+    )
+    .await;
+    assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
+    let payload = result.structured_content.expect("structured content");
+    assert_eq!(payload["status"]["kind"], "answered");
+    assert_eq!(payload["reference_count"], 1);
+    assert_eq!(payload["native_count"], payload["reference_count"]);
+    assert_eq!(payload["native"]["backend"], "mncs-research-bytecode");
+
+    // Unknown kinds fail as tool errors, not crashes.
+    let result = call(
+        &harness.peer,
+        "native_kind_count".to_owned(),
+        serde_json::json!({ "uri": uri_for("records.mncs"), "wanted_kind": " frobnicate " }),
+    )
+    .await;
+    assert!(result.is_error.unwrap_or(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn unknown_documents_fail_without_crashing_the_server() {
     let harness = spawn_server().await;
     let peer = &harness.peer;

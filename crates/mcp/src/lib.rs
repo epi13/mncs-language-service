@@ -77,6 +77,29 @@ pub struct ObligationsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct NativeKindCountParams {
+    pub uri: String,
+    /// Symbol kind to count (see tool description for the vocabulary).
+    pub wanted_kind: String,
+}
+
+fn parse_symbol_kind(name: &str) -> Option<mncs_service_core::SymbolKind> {
+    use mncs_service_core::SymbolKind;
+    Some(match name {
+        "module" => SymbolKind::Module,
+        "function" => SymbolKind::Function,
+        "parameter" => SymbolKind::Parameter,
+        "binding" => SymbolKind::Binding,
+        "iteration_state" => SymbolKind::IterationState,
+        "finite_type" => SymbolKind::FiniteType,
+        "finite_variant" => SymbolKind::FiniteVariant,
+        "record_type" => SymbolKind::RecordType,
+        "record_field" => SymbolKind::RecordField,
+        _ => return None,
+    })
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ContextPacketParams {
     pub uri: String,
     pub identity: String,
@@ -359,6 +382,25 @@ impl MncsSemanticServer {
             .service()
             .native_obligations(&uri, subject_identity.as_deref())
         {
+            Ok(response) => Ok(self.answered(serialize(&response))),
+            Err(error) => Ok(self.failed(error.to_string())),
+        }
+    }
+
+    #[tool(
+        description = "EXPERIMENTAL MNCS-native bounded symbol-kind filter. Projects the document's symbol index to stable kind tags, counts the wanted kind through the authoritative generic mncs.core.sequences.v1::count query on the real mncs-language research-bytecode backend, and compares with the Rust control result. Wanted kinds: module, function, parameter, binding, iteration_state, finite_type, finite_variant, record_type, record_field. Unsupported or inconsistent results fail closed."
+    )]
+    async fn native_kind_count(
+        &self,
+        Parameters(NativeKindCountParams { uri, wanted_kind }): Parameters<NativeKindCountParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let uri = self.resolve_uri(&uri);
+        let Some(wanted) = parse_symbol_kind(&wanted_kind) else {
+            return Ok(self.failed(format!(
+                "unknown symbol kind {wanted_kind:?}; expected one of module, function, parameter, binding, iteration_state, finite_type, finite_variant, record_type, record_field"
+            )));
+        };
+        match self.service().native_kind_count(&uri, wanted) {
             Ok(response) => Ok(self.answered(serialize(&response))),
             Err(error) => Ok(self.failed(error.to_string())),
         }

@@ -133,6 +133,23 @@ pub struct DiagnosticItem {
     pub expected: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub found: Option<String>,
+    /// Causal inner diagnostics preserved through import-boundary wrapping.
+    /// Leaf spans are relative to the failing dependency's source, so each
+    /// entry carries its own owning URI; `range` is present only when the
+    /// owning document is resident and the span projects there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<DiagnosticRelated>,
+}
+
+/// One causal inner diagnostic with its owning location, if resolvable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticRelated {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<Range>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -465,6 +482,7 @@ pub struct LanguageService {
     /// global locks during expensive frontend work.
     analyze_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     pub(crate) native_kernel: RwLock<Option<Arc<crate::native_query::NativeQueryKernel>>>,
+    pub(crate) filter_kernel: RwLock<Option<Arc<crate::native_filter::NativeFilterKernel>>>,
 }
 
 impl Default for LanguageService {
@@ -480,6 +498,7 @@ impl LanguageService {
             analyses: RwLock::new(BTreeMap::new()),
             analyze_locks: Mutex::new(BTreeMap::new()),
             native_kernel: RwLock::new(None),
+            filter_kernel: RwLock::new(None),
         }
     }
 
@@ -498,6 +517,15 @@ impl LanguageService {
 
     pub fn did_change(&self, uri: &str, version: i32, text: String) -> Result<u64, ServiceError> {
         self.store.did_change(uri, version, text)
+    }
+
+    pub fn did_change_incremental(
+        &self,
+        uri: &str,
+        version: i32,
+        changes: Vec<crate::edits::TextChange>,
+    ) -> Result<u64, ServiceError> {
+        self.store.did_change_incremental(uri, version, changes)
     }
 
     pub fn did_save(&self, uri: &str, text: Option<String>) -> Result<u64, ServiceError> {
@@ -696,7 +724,7 @@ impl LanguageService {
 
     pub fn document_diagnostics(&self, uri: &str) -> Result<DiagnosticsResponse, ServiceError> {
         let snapshot = self.snapshot(uri)?;
-        let items = render_diagnostics(&snapshot);
+        let items = render_diagnostics(&snapshot, &self.store);
         Ok(DiagnosticsResponse {
             status: ResponseStatus::Answered,
             snapshot: Some(snapshot_info(uri, &snapshot)),
@@ -806,7 +834,7 @@ impl LanguageService {
     /// references are already indexed in `snapshot`; imported references point
     /// at a declaration span from the imported source, so join them against
     /// resident document indexes without guessing from text alone.
-    fn targets_for_reference(
+    pub(crate) fn targets_for_reference(
         &self,
         uri: &str,
         snapshot: &DocumentAnalysis,
@@ -832,7 +860,7 @@ impl LanguageService {
         matches
     }
 
-    fn symbols_matching(
+    pub(crate) fn symbols_matching(
         &self,
         declaration: mncs_syntax::SourceSpan,
         kind: SymbolKind,
@@ -984,7 +1012,11 @@ impl LanguageService {
         })
     }
 
-    fn primary_symbol_index(&self, snapshot: &DocumentAnalysis, byte: usize) -> Option<usize> {
+    pub(crate) fn primary_symbol_index(
+        &self,
+        snapshot: &DocumentAnalysis,
+        byte: usize,
+    ) -> Option<usize> {
         snapshot
             .symbols
             .references_at(byte)
@@ -1479,6 +1511,84 @@ impl LanguageService {
         }
     }
 
+    /// Execute the bounded MNCS-native kind filter against the document's
+    /// symbol-index projection.
+    ///
+    /// The second experimental native kernel (after obligation statuses):
+    /// the Rust control projects the first [`MAX_FILTER_TAGS`] indexed
+    /// symbols to stable kind tags, the MNCS kernel counts the wanted tag
+    /// through the authoritative generic `mncs.core.sequences.v1::count`,
+    /// and the response fails closed on any disagreement. This is the
+    /// roadmap's bounded-symbol-filtering pressure point made executable.
+    pub fn native_kind_count(
+        &self,
+        uri: &str,
+        wanted: SymbolKind,
+    ) -> Result<NativeKindCountResponse, ServiceError> {
+        use crate::native_filter::{execute_count_matching, symbol_kind_tag, MAX_FILTER_TAGS};
+
+        let snapshot = self.snapshot(uri)?;
+        let info = || snapshot_info(uri, &snapshot);
+        let tags: Vec<i64> = snapshot
+            .symbols
+            .symbols
+            .iter()
+            .take(MAX_FILTER_TAGS)
+            .map(|entry| symbol_kind_tag(entry.kind))
+            .collect();
+        let wanted_tag = symbol_kind_tag(wanted);
+        let reference_count = tags.iter().filter(|tag| **tag == wanted_tag).count();
+        match execute_count_matching(&self.filter_kernel, &self.store, &tags, wanted_tag) {
+            Ok(native) => {
+                let mut unresolved = Vec::new();
+                if native.native_count != reference_count
+                    || native.reference_count != reference_count
+                {
+                    unresolved.push(format!(
+                        "MNCS-native kind count disagrees with the Rust control result: reference={reference_count}, native={}",
+                        native.native_count
+                    ));
+                }
+                if !native.valid {
+                    unresolved
+                        .push("MNCS-native filter kernel rejected its bounded envelope".to_owned());
+                }
+                let status = if unresolved.is_empty() {
+                    ResponseStatus::Answered
+                } else {
+                    ResponseStatus::Unsupported {
+                        reason: "MNCS-native kind filter did not agree with the authoritative Rust control result"
+                            .to_owned(),
+                    }
+                };
+                Ok(NativeKindCountResponse {
+                    status,
+                    snapshot: Some(info()),
+                    wanted_kind: wanted,
+                    wanted_tag,
+                    input_tags: tags,
+                    reference_count,
+                    native_count: native.native_count,
+                    native: Some(native),
+                    unresolved,
+                })
+            }
+            Err(reason) => Ok(NativeKindCountResponse {
+                status: ResponseStatus::Unsupported {
+                    reason: format!("MNCS-native kind filter unavailable: {reason}"),
+                },
+                snapshot: Some(info()),
+                wanted_kind: wanted,
+                wanted_tag,
+                input_tags: tags,
+                reference_count,
+                native_count: reference_count,
+                native: None,
+                unresolved: vec![reason],
+            }),
+        }
+    }
+
     fn obligations_response(
         &self,
         uri: &str,
@@ -1702,6 +1812,27 @@ pub struct ObligationsResponse {
 
 pub type ObligationsForUri = ObligationsResponse;
 
+/// Result of the second MNCS-native service query (bounded symbol-kind
+/// filtering). `reference_count` is the Rust control result over the
+/// projected `input_tags`; `native_count` is the independently executed
+/// MNCS result. `Answered` only on agreement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeKindCountResponse {
+    pub status: ResponseStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<SnapshotInfo>,
+    pub wanted_kind: SymbolKind,
+    pub wanted_tag: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_tags: Vec<i64>,
+    pub reference_count: usize,
+    pub native_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native: Option<crate::native_filter::NativeFilterSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusCounts {
     pub pass: usize,
@@ -1831,7 +1962,10 @@ fn obligation_subject_matches(
     false
 }
 
-pub(crate) fn render_diagnostics(snapshot: &DocumentAnalysis) -> Vec<DiagnosticItem> {
+pub(crate) fn render_diagnostics(
+    snapshot: &DocumentAnalysis,
+    store: &crate::document::DocumentStore,
+) -> Vec<DiagnosticItem> {
     let text = snapshot.text();
     snapshot
         .diagnostics()
@@ -1844,8 +1978,93 @@ pub(crate) fn render_diagnostics(snapshot: &DocumentAnalysis) -> Vec<DiagnosticI
             range: snapshot.positions.range_of(text, diagnostic.span),
             expected: diagnostic.expected.iter().map(format_token_kind).collect(),
             found: diagnostic.found.as_ref().map(format_token_kind),
+            related: render_related(snapshot, store, diagnostic),
         })
         .collect()
+}
+
+/// Project causal inner diagnostics to their owning locations.
+///
+/// Import-boundary wraps (`MNE172`) carry leaf diagnostics whose spans are
+/// relative to the failing dependency's source, *not* the importing file, so
+/// projecting them here would point at wrong text. The outer span covers the
+/// `use` module name, which resolves through the same store resolver used
+/// for analysis; when the dependency is resident its own snapshot projects
+/// the exact range, otherwise the entry keeps the owning URI with no range
+/// rather than a guessed one.
+fn render_related(
+    snapshot: &DocumentAnalysis,
+    store: &crate::document::DocumentStore,
+    outer: &mncs_syntax::SourceDiagnostic,
+) -> Vec<DiagnosticRelated> {
+    if outer.related.is_empty() {
+        return Vec::new();
+    }
+    let text = snapshot.text();
+    let dependency_uri = text
+        .get(outer.span.start..outer.span.end)
+        .and_then(parse_use_target)
+        .and_then(|module| {
+            use mncs_compiler::ModuleResolver;
+            crate::modules::StoreResolver::new(store)
+                .resolve(&module)
+                .and_then(|envelope| envelope.origin.locator)
+        });
+    outer
+        .related
+        .iter()
+        .map(|leaf| {
+            let (uri, range) = match dependency_uri.clone() {
+                Some(uri) => (Some(uri.clone()), project_leaf(store, &uri, leaf.span)),
+                None => (None, None),
+            };
+            DiagnosticRelated {
+                code: leaf.code.clone(),
+                message: leaf.message.clone(),
+                uri,
+                range,
+            }
+        })
+        .collect()
+}
+
+/// Best-effort range projection of a leaf span into a resident dependency
+/// snapshot. `None` when the dependency is not resident: a file-level
+/// reference beats a wrong range.
+fn project_leaf(
+    store: &crate::document::DocumentStore,
+    uri: &str,
+    span: mncs_syntax::SourceSpan,
+) -> Option<Range> {
+    let text = store.content(uri).ok()?;
+    // Projecting requires that exact content; the snapshot layer owns the
+    // authoritative mapping, so rebuild it from the resident text. This is
+    // the same translation the owning document's own diagnostics use.
+    let map = crate::coords::PositionMap::new(&text);
+    if span.start > text.len() || span.end > text.len() {
+        return None;
+    }
+    Some(map.range_of(&text, span))
+}
+
+/// Read a `use` target from the outer diagnostic span: either the bare
+/// module name (`MNE172` covers the name token) or a full `use x.y;` line.
+fn parse_use_target(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let rest = trimmed.strip_prefix("use").unwrap_or(trimmed).trim();
+    let rest = rest.strip_suffix(';').unwrap_or(rest).trim();
+    // Module names are lowercase/alphanumeric/dot/underscore segments.
+    if rest.is_empty()
+        || !rest
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_')
+        || rest.starts_with('.')
+        || rest.ends_with('.')
+        || rest.contains("..")
+    {
+        return None;
+    }
+    Some(rest.to_owned())
 }
 
 fn format_token_kind(kind: &mncs_syntax::TokenKind) -> String {

@@ -108,3 +108,85 @@ fn document_mutation_invalidates_exactly_once() {
         start.elapsed()
     );
 }
+
+#[test]
+fn second_wave_queries_and_edit_reanalysis_stay_interactive() {
+    use mncs_service_core::SymbolKind;
+
+    let svc = LanguageService::new(Some(fixtures_dir()));
+    let uri = uri_for("valid-contracts.mncs");
+    svc.snapshot(&uri).expect("warm-up");
+
+    let text = (*svc.store().content(&uri).expect("content")).clone();
+    let map = mncs_service_core::PositionMap::new(&text);
+    let call = text.rfind("bounded_step").expect("call site");
+    let info = map.position_of(&text, call);
+    let decl = text.find("fn bounded_step").expect("decl") + 3;
+    let decl_info = map.position_of(&text, decl);
+
+    let mut timings: Vec<(String, std::time::Duration)> = Vec::new();
+    let timed =
+        |timings: &mut Vec<(String, std::time::Duration)>, name: &str, work: &mut dyn FnMut()| {
+            let start = Instant::now();
+            work();
+            timings.push((name.to_owned(), start.elapsed()));
+        };
+    timed(&mut timings, "signature_help", &mut || {
+        let _ = svc.signature_help(&uri, info.line, info.character);
+    });
+    timed(&mut timings, "declaration", &mut || {
+        let _ = svc.declaration(&uri, info.line, info.character);
+    });
+    timed(&mut timings, "type_definition", &mut || {
+        let _ = svc.type_definition(&uri, info.line, info.character);
+    });
+    timed(&mut timings, "selection_ranges", &mut || {
+        let _ = svc.selection_ranges(&uri, &[(info.line, info.character)]);
+    });
+    timed(&mut timings, "prepare_call_hierarchy", &mut || {
+        let _ = svc.prepare_call_hierarchy(&uri, decl_info.line, decl_info.character);
+    });
+    timed(&mut timings, "inlay_hints", &mut || {
+        let _ = svc.inlay_hints(&uri, 0, 0, 1000, 0);
+    });
+    timed(&mut timings, "rename", &mut || {
+        let _ = svc.rename(&uri, decl_info.line, decl_info.character, "probe_name");
+    });
+    timed(&mut timings, "formatting", &mut || {
+        let _ = svc.formatting(&uri);
+    });
+    timed(&mut timings, "code_actions", &mut || {
+        let _ = svc.code_actions(&uri, info.line, info.character, info.line, info.character);
+    });
+    // One-character incremental edit followed by full re-analysis: the
+    // current batch-oriented cost floor (see pressure LS-P-001).
+    timed(
+        &mut timings,
+        "incremental_edit_plus_reanalysis",
+        &mut || {
+            let _ = svc.store().content(&uri).expect("content");
+            let _ = svc.did_change_incremental(
+                &uri,
+                99,
+                vec![mncs_service_core::TextChange {
+                    range: Some(mncs_service_core::TextRange {
+                        start_line: info.line,
+                        start_character: info.character,
+                        end_line: info.line,
+                        end_character: info.character,
+                    }),
+                    text: "x".to_owned(),
+                }],
+            );
+            let _ = svc.document_diagnostics(&uri).expect("diagnostics");
+        },
+    );
+    let _ = SymbolKind::Function;
+    for (name, elapsed) in &timings {
+        println!("{name}: {elapsed:?}");
+        assert!(
+            *elapsed < Duration::from_secs(5),
+            "{name} took {elapsed:?}; interactive budget blown"
+        );
+    }
+}
