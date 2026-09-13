@@ -1,0 +1,12 @@
+{
+  "schema_version": "mncs-family.repository-manifest/v0alpha1",
+  "repository": "mncs-language-service",
+  "revision": 1,
+  "manifest_location": "in-repository",
+  "authority": {"note": "Language Service owns protocol adapters and resident semantic queries; mncs-language owns semantics."},
+  "contracts": {
+    "provides": [{"contract": "language-tooling", "version": "1", "kind": "lsp-mcp-service", "stability": "experimental", "fingerprint_sources": ["crates/service-core/", "crates/lsp/", "crates/mcp/"]}],
+    "consumes": [{"contract": "mncs-language.semantic-identity", "envelope": {"op": "any"}, "required": true, "evidence_refs": ["README.md"]}],
+    "tests": [{"test": "language-service-tests", "covers": ["language-tooling"], "obligation": "self", "command": {"argv": ["cargo", "test", "--workspace"]}}]
+  }
+}
