@@ -1,0 +1,121 @@
+{
+  "steps": [
+    {
+      "output": {
+        "callHierarchyProvider": true,
+        "codeActionProvider": true,
+        "definitionProvider": true,
+        "documentFormattingProvider": true,
+        "hoverProvider": true,
+        "inlayHintProvider": true,
+        "renameProvider": true,
+        "signatureHelpProvider": {
+          "triggerCharacters": [
+            "(",
+            ","
+          ]
+        },
+        "textDocumentSync": 2
+      },
+      "step": "initialize"
+    },
+    {
+      "output": [],
+      "step": "didOpen.diagnostics"
+    },
+    {
+      "output": {
+        "contents": {
+          "kind": "markdown",
+          "value": "```mncs\nfn bounded_step(n: i64, limit: i64) -> (result: i64)\n```\n\n**Contracts**\n- `requires` n_within_limit — `n_within_limit`\n\n**Capabilities**: checked_integer\n\n**Obligations**: 1 pass, 0 fail, 2 unknown\n\n*identity*: `mncs:0.2:function:examples.contracts::bounded_step`"
+        },
+        "range": {
+          "end": {
+            "character": 15,
+            "line": 4
+          },
+          "start": {
+            "character": 3,
+            "line": 4
+          }
+        }
+      },
+      "step": "hover"
+    },
+    {
+      "output": [
+        "bool",
+        "bounded_step",
+        "caller",
+        "i16",
+        "i32",
+        "i64",
+        "i8",
+        "u16",
+        "u32",
+        "u64",
+        "u8",
+        "value"
+      ],
+      "step": "completion.labels"
+    },
+    {
+      "output": [
+        {
+          "range": {
+            "end": {
+              "character": 15,
+              "line": 4
+            },
+            "start": {
+              "character": 3,
+              "line": 4
+            }
+          },
+          "uri": "file://$FIXTURES/valid-contracts.mncs"
+        }
+      ],
+      "step": "definition"
+    },
+    {
+      "output": [
+        {
+          "code": "MNE131",
+          "message": "call target does not resolve to a function in this module",
+          "range": {
+            "end": {
+              "character": 24,
+              "line": 18
+            },
+            "start": {
+              "character": 11,
+              "line": 18
+            }
+          }
+        }
+      ],
+      "step": "didChange.diagnostics"
+    },
+    {
+      "output": {
+        "activeParameter": 1,
+        "activeSignature": 0,
+        "signatures": [
+          {
+            "label": "fn bounded_step(n: i64, limit: i64) -> (result: i64)",
+            "parameters": [
+              {
+                "label": "n: i64"
+              },
+              {
+                "label": "limit: i64"
+              }
+            ]
+          }
+        ]
+      },
+      "step": "signatureHelp.declaration"
+    }
+  ],
+  "version": 1
+}

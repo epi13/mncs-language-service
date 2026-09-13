@@ -331,6 +331,8 @@ pub(crate) fn execute_status_summary(
             function: QUERY_FUNCTION.to_owned(),
         },
         arguments,
+        // Concrete (non-generic) kernel entrypoint: no type arguments.
+        type_arguments: Vec::new(),
         step_budget: STEP_BUDGET,
         policy: Default::default(),
         host_grants: Vec::new(),

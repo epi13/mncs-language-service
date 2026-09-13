@@ -8,7 +8,8 @@ The service maintains **resident workspace state**: it tracks documents, runs th
 
 ## Status
 
-**Phase 1–4.6 first implementation: working vertical slice (implemented / exercised, with an experimental MNCS-native query kernel).**
+**Phases 1–4.7: working service with second-wave editor intelligence and two
+experimental MNCS-native query kernels (implemented / exercised).**
 
 ```text
 MNCS source
@@ -26,10 +27,28 @@ shared semantic query core        (mncs-service-core)
 What works today:
 
 - document lifecycle (open/change/save/close) with unsaved editor buffers overriding disk;
+- **incremental synchronization**: ranged `didChange` edits apply against
+  buffer state in order (UTF-16 aware), alongside full-document replacement;
 - authoritative parsing/elaboration/validation through `ReferenceCompiler::front_end`;
 - immutable snapshots bound to exact source identities with correct coarse invalidation;
-- structured diagnostics preserving codes/stages/severities/spans;
-- hover, go-to-definition, references, highlights — all from authoritative name resolution, never text search;
+- structured diagnostics preserving codes/stages/severities/spans, plus
+  causal `related` entries projected to their owning dependency locations
+  (URI, and exact range when the dependency is resident) instead of
+  misattributed same-file ranges;
+- hover, go-to-definition, **go-to-declaration**, **go-to-type-definition**,
+  references, highlights — all from authoritative name resolution, never text search;
+- **signature help** (token-driven, so it keeps answering mid-typing when no
+  AST exists), with active-argument tracking and generic parameters;
+- **semantic rename** with workspace-wide bound-reference collection,
+  lexical validation, same-scope collision refusal, and explicit errors
+  (never silent no-ops);
+- **call hierarchy** (prepare/incoming/outgoing) from authoritative
+  resolutions with call-site ranges, workspace-wide;
+- **selection ranges** from CST ancestry, **inlay hints** (parameter names
+  for arity-matching resolved calls), **document and range formatting**
+  (deterministic, idempotent, token-preserving);
+- **code actions**: missing-import quickfixes for unresolvable calls
+  (`MNE131`) when another module exports the name;
 - document/workspace symbols including Source Profile 0.5 record types and fields;
 - semantic tokens, conservative completion, folding ranges;
 - call-graph dependencies/dependents derived from elaborated bodies;
@@ -38,6 +57,10 @@ What works today:
   statuses into a bounded MNCS query, executes the real
   `mncs-research-bytecode` backend, validates identity-bound results, and
   differentially compares them with the Rust control result;
+- experimental `native_kind_count` (second native kernel): projects the
+  symbol index to stable kind tags and counts the wanted kind through the
+  authoritative generic `mncs.core.sequences.v1::count<8>`, differentially
+  compared with the Rust control (MCP tool included);
 - candidate analysis (Phase 4): isolated candidate snapshots with language-owned
   semantic/obligation deltas and stale-evidence detection (`analyze_candidate`,
   MCP + native), never mutating the workspace baseline. Candidates elaborate
@@ -50,9 +73,21 @@ What works today:
   the authoritative lexer, plus prepared Linguist language metadata, licensed
   samples, validation tooling, and an honest adoption measurement. GitHub does
   not yet recognize MNCS — upstream acceptance is pending real-world usage
-  ([details](docs/github-language-support.md)).
+  ([details](docs/github-language-support.md));
+- a structured **language-pressure ledger** ([`pressure/`](pressure/README.md))
+  recording deficiencies MNCS itself exposed during service construction,
+  each with reproducer, classification, and workaround cost.
 
-What is explicitly not implemented yet: mutation/semantic patches (Phase 5+), incremental fine-grained invalidation, broader native query families, and direct Forge/Fabric execution integration. The native obligation path is bounded to eight statuses, currently selects only the research-bytecode backend, and requires `MNCS_LIBRARY_PATH` for the authoritative status standard-library module. The service does include a drift-guard fixture that resolves the shared MNCS-native Forge source spine through `MNCS_LIBRARY_PATH`.
+What is explicitly not implemented yet: mutation/semantic patches beyond
+rename (Phase 5+), fine-grained incremental invalidation and cancellation
+(see [`pressure/LS-P-001.md`](pressure/LS-P-001.md) and
+[`pressure/LS-P-004.md`](pressure/LS-P-004.md)), on-type formatting, type
+hierarchy (MNCS has no inheritance to expose), and direct Forge/Fabric
+execution integration. Both native kernels are bounded (eight slots),
+select only the research-bytecode backend, and require `MNCS_LIBRARY_PATH`
+for their authoritative standard-library modules. The service does include
+a drift-guard fixture that resolves the shared MNCS-native Forge source
+spine through `MNCS_LIBRARY_PATH`.
 
 See [`ROADMAP.md`](ROADMAP.md) for the authoritative status vocabulary.
 
@@ -197,10 +232,12 @@ the executable is outside the resolver's standard user-local locations.
 
 The current authoritative lexer has no string-literal token, so the bundled
 grammars intentionally do not invent quoted-string highlighting. The service
-currently advertises full synchronization, diagnostics, hover, definition,
-references, document/workspace symbols, semantic tokens, completion,
-highlights, and folding. Rename, code actions, formatting, signature help,
-and inlay hints remain unsupported.
+advertises incremental synchronization, diagnostics (with related
+locations), hover, definition, declaration, type definition, references,
+document/workspace symbols, semantic tokens, completion, highlights,
+folding, signature help, rename, formatting (document + range), selection
+ranges, call hierarchy, inlay hints, and code actions (missing-import
+quickfixes).
 
 Semantic tokens intentionally stay within the standard editor vocabulary:
 resolved functions, parameters, variables, types, enum members, properties,
@@ -235,12 +272,13 @@ with `OPENCODE_EXPERIMENTAL_LSP_TOOL=true` (or the broader
 [`integration/opencode/opencode.jsonc`](integration/opencode/opencode.jsonc).
 
 OpenCode starts `mncs-lsp` for `.mncs` files and uses the same semantic core as
-other editors. The service supports full-document synchronization, published
-diagnostics, hover, cross-file definition and references, document/workspace
-symbols, semantic tokens, conservative completion, highlights, and folding.
-Rename, code actions, formatting, signature help, and fine-grained incremental
-invalidations remain intentionally unsupported until the authoritative
-language APIs make them safe and useful.
+other editors. The service supports incremental synchronization, published
+diagnostics, hover, cross-file definition/declaration/references,
+document/workspace symbols, semantic tokens, conservative completion,
+highlights, folding, signature help, rename, formatting, selection ranges,
+call hierarchy, inlay hints, and import-assist code actions. Fine-grained
+incremental invalidations remain intentionally coarse until the authoritative
+language APIs support them (see [`pressure/LS-P-001.md`](pressure/LS-P-001.md)).
 
 Any LSP-capable editor can attach; e.g. Neovim (built-in LSP):
 
@@ -283,13 +321,19 @@ cargo test -p mncs-lsp --test lsp_protocol
 cargo test -p mncs-service-core --test module_imports
 ```
 
-`mncs-language` is consumed from `main`; the authoritative `NameResolutionIndex` recorded by elaboration and the public `contract_id` constructor are part of main.
+`mncs-language` is consumed from `main`, currently pinned at
+`85051d2a` (post ingest/type-architecture/ABI-transport tranches, including
+`SourceDiagnostic.related` leaf diagnostics and generic entrypoint support).
+The authoritative `NameResolutionIndex` recorded by elaboration and the
+public `contract_id` constructor are part of main.
 
-The experimental `native_obligations` MCP operation additionally requires
-`MNCS_LIBRARY_PATH` to point at a checkout's `mncs-language/library` directory.
-It is a read-only differential proving path: the Rust service still acquires
-the authoritative obligations and retains them beside the MNCS result, while
-the bounded status aggregation executes from [`mncs/status_query.mncs`](mncs/status_query.mncs).
+Both experimental native MCP operations (`native_obligations`,
+`native_kind_count`) additionally require `MNCS_LIBRARY_PATH` to point at a
+checkout's `mncs-language/library` directory. They are read-only
+differential proving paths: the Rust service still acquires the
+authoritative data and retains it beside the MNCS result, while the bounded
+aggregation executes from [`mncs/status_query.mncs`](mncs/status_query.mncs)
+and [`mncs/filter_query.mncs`](mncs/filter_query.mncs).
 
 ## Core principles
 

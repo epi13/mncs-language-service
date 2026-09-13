@@ -17,6 +17,10 @@ use mncs_service_core::{
     CompletionClass, LanguageService, ResponseStatus, SymbolKind as CoreSymbolKind, TokenClass,
 };
 use tower_lsp::jsonrpc::Result;
+use tower_lsp::lsp_types::request::{
+    GotoDeclarationParams, GotoDeclarationResponse, GotoTypeDefinitionParams,
+    GotoTypeDefinitionResponse,
+};
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use url::Url as Uri;
@@ -84,7 +88,26 @@ impl Backend {
                     code_description: None,
                     source: Some("mncs".to_owned()),
                     message: item.message.clone(),
-                    related_information: None,
+                    related_information: if item.related.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            item.related
+                                .iter()
+                                .map(|related| DiagnosticRelatedInformation {
+                                    location: Location::new(
+                                        related
+                                            .uri
+                                            .as_deref()
+                                            .and_then(|text| Uri::parse(text).ok())
+                                            .unwrap_or_else(|| uri.clone()),
+                                        related.range.map(Self::to_range).unwrap_or_default(),
+                                    ),
+                                    message: format!("{}: {}", related.code, related.message),
+                                })
+                                .collect(),
+                        )
+                    },
                     tags: None,
                     // Structured metadata without requiring client support.
                     data: Some(serde_json::json!({
@@ -140,6 +163,30 @@ impl Backend {
         let uri_text = summary.uri.as_deref()?;
         let uri = Uri::parse(uri_text).ok()?;
         Some(Location::new(uri, Self::to_range(summary.name_range)))
+    }
+
+    fn hierarchy_item(item: &mncs_service_core::CallHierarchyItem) -> Option<CallHierarchyItem> {
+        Some(CallHierarchyItem {
+            name: item.name.clone(),
+            kind: symbol_kind(item.kind),
+            tags: None,
+            detail: item.detail.clone(),
+            uri: Uri::parse(&item.uri).ok()?,
+            range: Self::to_range(item.range),
+            selection_range: Self::to_range(item.name_range),
+            data: item
+                .identity
+                .clone()
+                .map(|identity| serde_json::json!({ "mncsIdentity": identity })),
+        })
+    }
+
+    fn hierarchy_identity(item: &CallHierarchyItem) -> Option<String> {
+        item.data
+            .as_ref()?
+            .get("mncsIdentity")?
+            .as_str()
+            .map(str::to_owned)
     }
 }
 
@@ -209,7 +256,7 @@ impl LanguageServer for Backend {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                    TextDocumentSyncKind::INCREMENTAL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
@@ -225,6 +272,20 @@ impl LanguageServer for Backend {
                     all_commit_characters: None,
                     completion_item: None,
                 }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                    trigger_characters: Some(vec!["(".to_owned(), ",".to_owned()]),
+                    retrigger_characters: None,
+                }),
+                declaration_provider: Some(DeclarationCapability::Simple(true)),
+                type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
+                rename_provider: Some(OneOf::Left(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
+                document_range_formatting_provider: Some(OneOf::Left(true)),
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+                inlay_hint_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -280,12 +341,27 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
-        let Some(last) = params.content_changes.into_iter().last() else {
+        if params.content_changes.is_empty() {
             return;
-        };
+        }
+        // Incremental clients send ranged edits; older full-sync clients send
+        // one untargeted replacement. The core applies either form.
+        let changes = params
+            .content_changes
+            .into_iter()
+            .map(|change| mncs_service_core::TextChange {
+                range: change.range.map(|range| mncs_service_core::TextRange {
+                    start_line: range.start.line,
+                    start_character: range.start.character,
+                    end_line: range.end.line,
+                    end_character: range.end.character,
+                }),
+                text: change.text,
+            })
+            .collect();
         if let Err(error) =
             self.service
-                .did_change(uri.as_str(), params.text_document.version, last.text)
+                .did_change_incremental(uri.as_str(), params.text_document.version, changes)
         {
             let client = self.client.clone();
             let message = format!("{error}");
@@ -534,6 +610,398 @@ impl LanguageServer for Backend {
                     end_character: None,
                     kind: None,
                     collapsed_text: None,
+                })
+                .collect(),
+        ))
+    }
+
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let position = params.text_document_position_params.position;
+        let uri = params.text_document_position_params.text_document.uri;
+        match self
+            .service
+            .signature_help(uri.as_str(), position.line, position.character)
+        {
+            Ok(response) if matches!(response.status, ResponseStatus::Answered) => {
+                Ok(Some(SignatureHelp {
+                    signatures: vec![SignatureInformation {
+                        label: response.label.unwrap_or_default(),
+                        documentation: None,
+                        parameters: Some(
+                            response
+                                .parameters
+                                .into_iter()
+                                .map(|parameter| ParameterInformation {
+                                    label: ParameterLabel::Simple(format!(
+                                        "{}: {}",
+                                        parameter.name, parameter.type_name
+                                    )),
+                                    documentation: None,
+                                })
+                                .collect(),
+                        ),
+                        active_parameter: None,
+                    }],
+                    active_signature: Some(0),
+                    active_parameter: Some(response.active_parameter as u32),
+                }))
+            }
+            Ok(response) => {
+                self.log_unanswered(&response.status);
+                Ok(None)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn goto_declaration(
+        &self,
+        params: GotoDeclarationParams,
+    ) -> Result<Option<GotoDeclarationResponse>> {
+        let position = params.text_document_position_params.position;
+        let uri = params.text_document_position_params.text_document.uri;
+        match self
+            .service
+            .declaration(uri.as_str(), position.line, position.character)
+        {
+            Ok(response) if matches!(response.status, ResponseStatus::Answered) => {
+                Ok(Some(GotoDefinitionResponse::Array(
+                    response
+                        .definitions
+                        .iter()
+                        .filter_map(|summary| self.location(summary))
+                        .collect(),
+                )))
+            }
+            Ok(response) => {
+                self.log_unanswered(&response.status);
+                Ok(None)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn goto_type_definition(
+        &self,
+        params: GotoTypeDefinitionParams,
+    ) -> Result<Option<GotoTypeDefinitionResponse>> {
+        let position = params.text_document_position_params.position;
+        let uri = params.text_document_position_params.text_document.uri;
+        match self
+            .service
+            .type_definition(uri.as_str(), position.line, position.character)
+        {
+            Ok(response) if matches!(response.status, ResponseStatus::Answered) => {
+                Ok(Some(GotoDefinitionResponse::Array(
+                    response
+                        .definitions
+                        .iter()
+                        .filter_map(|summary| self.location(summary))
+                        .collect(),
+                )))
+            }
+            Ok(response) => {
+                self.log_unanswered(&response.status);
+                Ok(None)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        match self.service.rename(
+            uri.as_str(),
+            position.line,
+            position.character,
+            &params.new_name,
+        ) {
+            Ok(response) if matches!(response.status, ResponseStatus::Answered) => {
+                let mut changes = std::collections::HashMap::new();
+                for file in &response.changes {
+                    let Ok(file_uri) = Uri::parse(&file.uri) else {
+                        continue;
+                    };
+                    changes.insert(
+                        file_uri,
+                        file.edits
+                            .iter()
+                            .map(|edit| TextEdit {
+                                range: Self::to_range(edit.range),
+                                new_text: edit.new_text.clone(),
+                            })
+                            .collect(),
+                    );
+                }
+                Ok(Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    document_changes: None,
+                    change_annotations: None,
+                }))
+            }
+            Ok(response) => {
+                self.log_unanswered(&response.status);
+                // A refused rename must surface, not vanish: JSON-RPC error.
+                let reason = match response.status {
+                    ResponseStatus::Unresolved { reason }
+                    | ResponseStatus::Unsupported { reason } => reason,
+                    ResponseStatus::Answered => unreachable!(),
+                };
+                Err(tower_lsp::jsonrpc::Error {
+                    code: tower_lsp::jsonrpc::ErrorCode::InvalidParams,
+                    message: reason.into(),
+                    data: None,
+                })
+            }
+            Err(error) => Err(tower_lsp::jsonrpc::Error {
+                code: tower_lsp::jsonrpc::ErrorCode::InternalError,
+                message: error.to_string().into(),
+                data: None,
+            }),
+        }
+    }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let Ok(response) = self.service.formatting(uri.as_str()) else {
+            return Ok(None);
+        };
+        if response.already_formatted {
+            return Ok(None);
+        }
+        let Ok(text) = self.service.store().content(uri.as_str()) else {
+            return Ok(None);
+        };
+        let map = mncs_service_core::PositionMap::new(&text);
+        let end = map.position_of(&text, text.len());
+        Ok(Some(vec![TextEdit {
+            range: Range::new(Position::new(0, 0), Position::new(end.line, end.character)),
+            new_text: response.text,
+        }]))
+    }
+
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let Ok(response) = self.service.range_formatting(
+            uri.as_str(),
+            params.range.start.line,
+            params.range.end.line,
+        ) else {
+            return Ok(None);
+        };
+        let mut edits = Vec::new();
+        for file in &response.changes {
+            edits.extend(file.edits.iter().map(|edit| TextEdit {
+                range: Self::to_range(edit.range),
+                new_text: edit.new_text.clone(),
+            }));
+        }
+        if edits.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(edits))
+        }
+    }
+
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>> {
+        let uri = params.text_document.uri;
+        let positions = params
+            .positions
+            .iter()
+            .map(|position| (position.line, position.character))
+            .collect::<Vec<_>>();
+        let Ok(response) = self.service.selection_ranges(uri.as_str(), &positions) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            response
+                .chains
+                .iter()
+                .map(|chain| {
+                    // Core chains run innermost-first; LSP nests outward via
+                    // `parent`, so fold from the outermost range inward.
+                    let mut nested: Option<SelectionRange> = None;
+                    for range in chain.ranges.iter().rev() {
+                        nested = Some(SelectionRange {
+                            range: Self::to_range(*range),
+                            parent: nested.map(Box::new),
+                        });
+                    }
+                    nested.unwrap_or(SelectionRange {
+                        range: Range::default(),
+                        parent: None,
+                    })
+                })
+                .collect(),
+        ))
+    }
+
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> Result<Option<Vec<CallHierarchyItem>>> {
+        let position = params.text_document_position_params.position;
+        let uri = params.text_document_position_params.text_document.uri;
+        match self
+            .service
+            .prepare_call_hierarchy(uri.as_str(), position.line, position.character)
+        {
+            Ok(response) if matches!(response.status, ResponseStatus::Answered) => Ok(Some(
+                response
+                    .items
+                    .iter()
+                    .filter_map(Self::hierarchy_item)
+                    .collect(),
+            )),
+            Ok(response) => {
+                self.log_unanswered(&response.status);
+                Ok(None)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        let document_uri = params.item.uri.clone();
+        let Some(identity) = Self::hierarchy_identity(&params.item) else {
+            return Ok(None);
+        };
+        let Ok(response) = self
+            .service
+            .incoming_calls(document_uri.as_str(), &identity)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(
+            response
+                .edges
+                .iter()
+                .filter_map(|edge| {
+                    Some(CallHierarchyIncomingCall {
+                        from: Self::hierarchy_item(&edge.item)?,
+                        from_ranges: edge
+                            .from_ranges
+                            .iter()
+                            .map(|range| Self::to_range(*range))
+                            .collect(),
+                    })
+                })
+                .collect(),
+        ))
+    }
+
+    async fn outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let document_uri = params.item.uri.clone();
+        let Some(identity) = Self::hierarchy_identity(&params.item) else {
+            return Ok(None);
+        };
+        let Ok(response) = self
+            .service
+            .outgoing_calls(document_uri.as_str(), &identity)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(
+            response
+                .edges
+                .iter()
+                .filter_map(|edge| {
+                    Some(CallHierarchyOutgoingCall {
+                        to: Self::hierarchy_item(&edge.item)?,
+                        from_ranges: edge
+                            .from_ranges
+                            .iter()
+                            .map(|range| Self::to_range(*range))
+                            .collect(),
+                    })
+                })
+                .collect(),
+        ))
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri;
+        let Ok(response) = self.service.inlay_hints(
+            uri.as_str(),
+            params.range.start.line,
+            params.range.start.character,
+            params.range.end.line,
+            params.range.end.character,
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            response
+                .hints
+                .iter()
+                .map(|hint| InlayHint {
+                    position: Position::new(hint.line, hint.character),
+                    label: InlayHintLabel::String(hint.label.clone()),
+                    kind: Some(InlayHintKind::PARAMETER),
+                    text_edits: None,
+                    tooltip: None,
+                    padding_left: None,
+                    padding_right: Some(true),
+                    data: None,
+                })
+                .collect(),
+        ))
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+        let Ok(response) = self.service.code_actions(
+            uri.as_str(),
+            params.range.start.line,
+            params.range.start.character,
+            params.range.end.line,
+            params.range.end.character,
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            response
+                .actions
+                .into_iter()
+                .filter_map(|action| {
+                    let edit = action.edit?;
+                    let file_uri = Uri::parse(&edit.uri).ok()?;
+                    Some(CodeActionOrCommand::CodeAction(CodeAction {
+                        title: action.title,
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        diagnostics: None,
+                        edit: Some(WorkspaceEdit {
+                            changes: Some(std::collections::HashMap::from([(
+                                file_uri,
+                                edit.edits
+                                    .iter()
+                                    .map(|edit| TextEdit {
+                                        range: Self::to_range(edit.range),
+                                        new_text: edit.new_text.clone(),
+                                    })
+                                    .collect(),
+                            )])),
+                            document_changes: None,
+                            change_annotations: None,
+                        }),
+                        command: None,
+                        is_preferred: None,
+                        disabled: None,
+                        data: None,
+                    }))
                 })
                 .collect(),
         ))

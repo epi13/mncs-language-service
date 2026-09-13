@@ -1,0 +1,13 @@
+mncs 0.10;
+
+// The service owns this adapter signature; the counting semantics remain
+// authoritative in mncs.core.sequences.v1. The Rust service projects symbol
+// kinds to integer tags (see native_filter.rs for the stable mapping) and
+// pads unused slots with -1, which is never a valid tag.
+module mncs.language_service.filter_query.v1;
+
+use mncs.core.sequences.v1;
+
+fn count_matching(tags: [i64; 8], wanted: i64) -> (matches: i64) {
+    return count<8>(tags, wanted);
+}

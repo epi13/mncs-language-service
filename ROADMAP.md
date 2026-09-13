@@ -58,23 +58,24 @@ Not yet implemented: fine-grained incremental invalidation, persistent caches, m
 
 ## Phase 2 — First LSP adapter
 
-**Status: implemented / exercised for read features** (`crates/lsp`, binary `mncs-lsp`).
+**Status: implemented / exercised, extended in Phase 4.7** (`crates/lsp`, binary `mncs-lsp`).
 
 Working, protocol-tested via real JSON-RPC exchanges (`tower-lsp` service driven directly):
 
 - initialize/shutdown and workspace-root configuration;
-- full-document sync with open/change/save/close;
-- pushed diagnostics mapped through the shared coordinate layer, preserving codes and structured metadata;
+- incremental + full-document sync with open/change/save/close;
+- pushed diagnostics mapped through the shared coordinate layer, preserving codes, structured metadata, and related locations;
 - hover (signature, contracts, capabilities/effects, obligation summary, identity — identical content to MCP describe);
-- go-to-definition, references (with/without declaration), document highlights;
+- go-to-definition, go-to-declaration, go-to-type-definition, references (with/without declaration), document highlights;
 - nested document symbols including Profile 0.5 records/fields; workspace symbols across documents;
 - semantic tokens restricted to authoritatively classified identifiers plus keywords/numbers;
 - completion limited to high-confidence contexts (identifier prefixes, nominal-type member namespaces, record fields of typed bindings);
-- folding ranges from the CST.
+- folding ranges from the CST;
+- signature help (token-driven, mid-typing safe), semantic rename (explicit refusal errors), document + range formatting, selection ranges, call hierarchy, inlay hints, missing-import code actions.
 
-Deliberately omitted: rename/code actions/refactoring (mutation classes), willSave/waitUntil semantics beyond the required minimum, and any expensive-work trigger from keystrokes.
+Deliberately omitted: willSave/waitUntil semantics beyond the required minimum, on-type formatting, and any expensive-work trigger from keystrokes.
 
-The adapter is thin (~600 lines): it translates between LSP types and core queries only. Language understanding discovered missing was pushed into `mncs-language` (name resolutions), not implemented here.
+The adapter stays thin: it translates between LSP types and core queries only. Language understanding discovered missing was pushed into `mncs-language` (name resolutions), not implemented here.
 
 ## Phase 3 — First agent/MCP adapter
 
@@ -92,6 +93,8 @@ Read-only tools over the same resident core, protocol-tested with a real MCP cli
 | `list_symbols` | document-scoped or workspace-wide with name filter |
 | `semantic_dependencies` | `outgoing`/`incoming` call edges lifted from operation-level graph data |
 | `obligations` | subject-filterable; preserves PASS/FAIL/UNKNOWN + method + freshness + fallback |
+| `native_obligations` *(experimental)* | bounded MNCS-native status aggregation with Rust differential control |
+| `native_kind_count` *(experimental)* | bounded MNCS-native symbol-kind filter via generic `count<8>` with Rust differential control |
 | `context_packet` *(experimental)* | bounded declaration+callee excerpts; `complete=true` only when the outgoing-call closure fit the budget |
 
 Tool results carry structured JSON bound to snapshot identity; failures return explicit structured errors without killing the server. Causal explanation slices and authority/effect closure queries remain future work pending deeper language support.
@@ -187,9 +190,44 @@ The upstream positive and fail-closed negative compiler tests, plus the service
 differential integration test, are recorded in the language development
 evidence. Only research-bytecode support is claimed for this service query.
 
+## Phase 4.7 — Second-wave editor intelligence
+
+**Status: implemented / exercised.**
+
+Protocol-neutral core queries plus LSP transport for the capabilities the
+first slice deliberately omitted, built without duplicating language
+semantics:
+
+- incremental text synchronization (`edits.rs`, UTF-16 aware, property-tested);
+- signature help from lexical structure (works without an AST);
+- declaration (documents MNCS's single-site semantics) and type definition;
+- semantic rename with collision refusal and cross-file bound references;
+- call hierarchy with authoritative call-site ranges, workspace-wide;
+- CST-ancestry selection ranges; parameter-name inlay hints;
+- deterministic idempotent formatting (document + range) with
+  token-preservation properties;
+- missing-import quickfixes grounded in `MNE131` diagnostics;
+- leaf-relative diagnostic `related` entries resolved to owning locations.
+
+Covered by `service-core/tests/intelligence.rs`, extended
+`lsp/tests/lsp_protocol.rs`, a deterministic golden transcript
+(`lsp/tests/transcript.rs` + `tests/golden/transcript.json`), and
+interactive-latency evidence in `perf_sanity.rs`.
+
+## Phase 4.8 — Second native kernel and pressure ledger
+
+**Status: implemented / experimental.**
+
+- `mncs/filter_query.mncs` + `native_filter.rs`: bounded symbol-kind
+  filtering through the authoritative generic
+  `mncs.core.sequences.v1::count<8>`, differentially compared, exposed as
+  the MCP `native_kind_count` tool. Closes roadmap pressure point (a).
+- `pressure/`: stable-ID ledger (LS-P-001…LS-P-006) with reproducers,
+  classifications, and workaround costs.
+
 ## Phase 5 — Safe mutation and semantic patches
 
-**Status: deferred.**
+**Status: partially entered (rename shipped), remainder deferred.**
 
 Only begin after snapshot binding and candidate analysis are reliable.
 
@@ -253,14 +291,17 @@ Every phase should preserve:
 
 ## Immediate next action
 
-Phase 4 candidate analysis now has a working identity-bound core exercised by
-the MNCS-native RAVEL workspace (`epi13/RAVEL`, `mncs/workspace`): candidate
-snapshots, semantic deltas, obligation deltas, and language-owned stale-
-evidence detection. Phase 4.5 has the GitHub/Linguist integration prepared
-and gated on real adoption. Phase 4.6 now has one bounded MNCS-native query
-kernel with Rust differential control. The next evidence-led pressure points
-are (a) bounded symbol filtering, (b) deterministic relationship summaries,
-(c) RAVEL-driven use of candidate deltas inside its checkpoint flow, and (d)
-multi-root workspaces when the language grows beyond one module. Phase 5
-semantic patches remain gated until candidate snapshots have survived more
-real use.
+Phase 4.7/4.8 are implemented and exercised: second-wave editor
+intelligence (signature help, rename, formatting, call hierarchy, inlay
+hints, code actions, selection ranges, declaration/type definition,
+incremental sync, related diagnostics), a second MNCS-native kernel
+(bounded symbol-kind filtering), a golden LSP transcript, and the
+pressure ledger (LS-P-001…LS-P-006). Pressure point (a) bounded symbol
+filtering is closed as executable. The remaining evidence-led pressure
+points are (b) deterministic relationship summaries, (c) RAVEL-driven use
+of candidate deltas inside its checkpoint flow, and (d) multi-root
+workspaces when the language grows beyond one module. Upstream proposals
+awaiting language-side evidence cycles: LS-P-003 (diagnostic provenance
+field) and the LS-P-001/LS-P-004 incrementality/cancellation seams. Phase
+5 semantic patches remain gated until candidate snapshots have survived
+more real use.

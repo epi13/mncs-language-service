@@ -207,6 +207,38 @@ impl DocumentStore {
         self.did_open(uri, version, text)
     }
 
+    /// Apply one LSP `didChange` notification holding either a single
+    /// full-document replacement or a sequence of ranged incremental edits.
+    /// Ranged edits apply in order against the document's current content
+    /// (unsaved buffer when open, otherwise disk text); the result becomes
+    /// the new buffer, so incremental clients never resend whole files.
+    pub fn did_change_incremental(
+        &self,
+        uri: &str,
+        version: i32,
+        changes: Vec<crate::edits::TextChange>,
+    ) -> Result<u64, ServiceError> {
+        if changes.iter().any(|change| change.range.is_none()) {
+            let Some(last) = changes.into_iter().rfind(|change| change.range.is_none()) else {
+                return Err(ServiceError::InvalidRequest {
+                    reason: "empty change sequence".to_owned(),
+                });
+            };
+            return self.did_open(uri, version, last.text);
+        }
+        let current = self
+            .content(uri)
+            .map(|text| (*text).clone())
+            .unwrap_or_default();
+        let next = crate::edits::apply_changes(&current, &changes);
+        if next.len() > MAX_DOCUMENT_BYTES {
+            return Err(ServiceError::InvalidRequest {
+                reason: format!("document exceeds {MAX_DOCUMENT_BYTES} bytes"),
+            });
+        }
+        self.did_open(uri, version, next)
+    }
+
     /// Record a save. The service never writes files itself: editors own
     /// persistence, and by the time an LSP `didSave` arrives the on-disk file
     /// already matches. The service only reconciles its resident copy so
@@ -506,6 +538,63 @@ mod tests {
             (*store.content(&found[0]).expect("lazy load")).clone(),
             "mncs 0.2;\n"
         );
+    }
+
+    #[test]
+    fn incremental_changes_apply_against_buffer_without_full_resend() {
+        use crate::edits::{TextChange, TextRange};
+
+        let store = DocumentStore::new(None);
+        let uri = "untitled:incr-1";
+        store
+            .did_open(uri, 1, "let a: i64 = 1;\nlet b: i64 = 2;\n".to_owned())
+            .expect("open");
+        store
+            .did_change_incremental(
+                uri,
+                2,
+                vec![
+                    TextChange {
+                        range: Some(TextRange {
+                            start_line: 0,
+                            start_character: 4,
+                            end_line: 0,
+                            end_character: 5,
+                        }),
+                        text: "alpha".to_owned(),
+                    },
+                    TextChange {
+                        range: Some(TextRange {
+                            start_line: 1,
+                            start_character: 13,
+                            end_line: 1,
+                            end_character: 14,
+                        }),
+                        text: "3".to_owned(),
+                    },
+                ],
+            )
+            .expect("incremental change");
+        assert_eq!(
+            (*store.content(uri).expect("content")).clone(),
+            "let alpha: i64 = 1;\nlet b: i64 = 3;\n"
+        );
+        assert_eq!(
+            store.buffer_version(uri).expect("version").expect("open"),
+            2
+        );
+        // A full replacement inside a change sequence still works.
+        store
+            .did_change_incremental(
+                uri,
+                3,
+                vec![TextChange {
+                    range: None,
+                    text: "fresh\n".to_owned(),
+                }],
+            )
+            .expect("full change");
+        assert_eq!((*store.content(uri).expect("content")).clone(), "fresh\n");
     }
 
     #[test]
