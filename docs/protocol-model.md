@@ -141,12 +141,15 @@ Until then, adapters should remain conservative about write capabilities.
 
 `mncs.debug-source-binding/1` is the protocol-neutral source location
 projection shared with `mncs-debug`. It binds a resident source snapshot to
-the compiler-owned module/function/test declaration identity and an exact
-dual-coordinate declaration span. Runtime operation, failure-location, and
-breakpoint-resolution fields are capability-state objects; unsupported live
-debugger behavior is never represented as a resolved source location.
+the compiler-owned module/function/test declaration identity and exact
+dual-coordinate spans. When an execution operation identity is supplied, the
+same projection resolves its operation span from
+`mncs.execution-source-map/1`. Runtime failure control and live suspension
+remain capability-state objects; unsupported debugger behavior is never
+represented as a resolved source location.
 
 The MCP `debug_source_binding` tool accepts either one exact semantic identity
 or a line/character position. LSP adapters can use the same core query. This
-keeps source navigation useful today while leaving stepping and breakpoint
-semantics to the debugger/runtime layers that can actually establish them.
+keeps source navigation and operation resolution useful today while leaving
+stepping and breakpoint execution to the debugger/runtime layers that can
+actually establish them.

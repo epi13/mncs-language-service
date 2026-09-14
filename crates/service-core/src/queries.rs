@@ -789,10 +789,9 @@ impl LanguageService {
     /// Project one compiler-owned source subject into the shared debugger
     /// vocabulary. `identity` may be a function, test declaration, test case,
     /// or module identity. Alternatively, provide a zero-based source
-    /// position. The response is deliberately honest about the facts the
-    /// current compiler/runtime does not emit yet: declaration spans are
-    /// stable, but runtime operation/failure spans and live breakpoints are
-    /// unsupported.
+    /// position. Operation identities are resolved through the compiler-owned
+    /// execution source map; live suspension and runtime failure control are
+    /// separate capabilities.
     pub fn debug_source_binding(
         &self,
         uri: &str,
@@ -813,6 +812,15 @@ impl LanguageService {
         let snapshot = self.snapshot(uri)?;
         let text = snapshot.text();
         let inventory = snapshot.front_end.test_inventory.as_ref();
+        let execution_source_map = snapshot.front_end.execution_source_map.as_ref();
+        let operation = identity.and_then(|identity| {
+            execution_source_map.and_then(|source_map| {
+                source_map
+                    .operations
+                    .iter()
+                    .find(|candidate| candidate.identity.as_str() == identity)
+            })
+        });
         let (test, target) = if let Some(identity) = identity {
             let test = inventory.and_then(|inventory| {
                 inventory.tests.iter().find(|entry| {
@@ -835,6 +843,13 @@ impl LanguageService {
                     .iter()
                     .position(|entry| entry.kind == SymbolKind::Module);
             }
+            if target.is_none() {
+                if let Some(operation) = operation {
+                    target = snapshot.symbols.symbols.iter().position(|entry| {
+                        entry.identity.as_ref() == Some(&operation.function_identity)
+                    });
+                }
+            }
             (test, target)
         } else {
             let byte = snapshot.positions.offset_of(
@@ -853,7 +868,7 @@ impl LanguageService {
         };
 
         let target_entry = target.map(|index| &snapshot.symbols.symbols[index]);
-        if target_entry.is_none() && test.is_none() {
+        if target_entry.is_none() && test.is_none() && operation.is_none() {
             return Err(ServiceError::Unresolved {
                 reason: "identity or position does not resolve to a compiler-owned source subject"
                     .to_owned(),
@@ -861,22 +876,51 @@ impl LanguageService {
         }
 
         let module = module_name(&snapshot);
-        let function_name = test.map(|entry| entry.name.clone()).or_else(|| {
-            target_entry
-                .filter(|entry| entry.kind == SymbolKind::Function)
-                .map(|entry| entry.name.clone())
-        });
-        let function_identity = test
+        let function_name = operation
+            .and_then(|entry| {
+                execution_source_map.and_then(|source_map| {
+                    source_map
+                        .functions
+                        .iter()
+                        .find(|function| function.identity == entry.function_identity)
+                        .map(|function| function.name.clone())
+                })
+            })
+            .or_else(|| test.map(|entry| entry.name.clone()))
+            .or_else(|| {
+                target_entry
+                    .filter(|entry| entry.kind == SymbolKind::Function)
+                    .map(|entry| entry.name.clone())
+            });
+        let function_identity = operation
             .map(|entry| entry.function_identity.0.clone())
+            .or_else(|| test.map(|entry| entry.function_identity.0.clone()))
             .or_else(|| {
                 target_entry.and_then(|entry| entry.identity.as_ref().map(|id| id.0.clone()))
             });
         let test_declaration_identity = test.map(|entry| entry.declaration_identity.0.clone());
         let test_case_identity = test.map(|entry| entry.test_case_identity.0.clone());
-        let source_span = test
-            .map(|entry| entry.source_span)
+        let source_span = operation
+            .and_then(|entry| entry.source_span)
+            .or_else(|| test.map(|entry| entry.source_span))
             .or_else(|| target_entry.map(|entry| entry.full_span))
+            .or_else(|| {
+                operation.and_then(|_entry| {
+                    function_identity.as_ref().and_then(|identity| {
+                        execution_source_map.and_then(|source_map| {
+                            source_map
+                                .functions
+                                .iter()
+                                .find(|function| function.identity.as_str() == identity)
+                                .map(|function| function.declaration_span)
+                        })
+                    })
+                })
+            })
             .expect("subject or test supplied a span");
+        let runtime_operation_source_span = operation
+            .and_then(|entry| entry.source_span)
+            .map(|span| snapshot.positions.range_of(text, span));
 
         let binding = DebugSourceBinding {
             schema_version: DEBUG_SOURCE_BINDING_SCHEMA_VERSION.to_owned(),
@@ -892,18 +936,43 @@ impl LanguageService {
             source_span: snapshot.positions.range_of(text, source_span),
             symbol_resolution: DebugBindingResolution::Exact,
             failure_location: None,
-            runtime_operation_identity: None,
+            runtime_operation_identity: operation.map(|entry| entry.identity.0.clone()),
+            runtime_operation_source_span,
             runtime_operation_resolution: DebugCapabilityState {
-                status: DebugCapabilityStatus::Unsupported,
-                reason: "the compiler/runtime does not yet emit stable operation spans or operation identities".to_owned(),
+                status: if operation.is_some() {
+                    if runtime_operation_source_span.is_some() {
+                        DebugCapabilityStatus::Supported
+                    } else {
+                        DebugCapabilityStatus::PartiallySupported
+                    }
+                } else {
+                    DebugCapabilityStatus::Unsupported
+                },
+                reason: if operation.is_some() {
+                    if runtime_operation_source_span.is_some() {
+                        "operation identity and exact source span resolved from mncs.execution-source-map/1".to_owned()
+                    } else {
+                        "operation identity resolved, but the compiler marked this operation synthetic without a source span".to_owned()
+                    }
+                } else {
+                    "declaration query has no runtime operation identity".to_owned()
+                },
             },
             failure_location_resolution: DebugCapabilityState {
                 status: DebugCapabilityStatus::Unsupported,
                 reason: "failure locations remain debugger/runtime evidence, not declaration-span guesses".to_owned(),
             },
             breakpoint_resolution: DebugCapabilityState {
-                status: DebugCapabilityStatus::Unsupported,
-                reason: "live breakpoint resolution is not implemented; clients may use the exact source_span as a navigation anchor".to_owned(),
+                status: if operation.is_some() {
+                    DebugCapabilityStatus::PartiallySupported
+                } else {
+                    DebugCapabilityStatus::Unsupported
+                },
+                reason: if operation.is_some() {
+                    "source operation resolution is available, but live suspension/stop control is not implemented".to_owned()
+                } else {
+                    "live breakpoint resolution is not implemented; clients may use the exact source_span as a navigation anchor".to_owned()
+                },
             },
         };
         Ok(DebugSourceBindingResponse {

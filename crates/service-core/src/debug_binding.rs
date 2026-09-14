@@ -3,8 +3,9 @@
 //! This module does not implement a debugger. It projects the exact source
 //! snapshot and compiler-owned declaration/test identities into the vocabulary
 //! consumed by `mncs-debug`, so LSP/MCP clients do not invent a second source
-//! location model. Runtime operation and failure locations stay explicitly
-//! unavailable until the compiler/runtime emits those facts.
+//! location model. Runtime operation locations are resolved from the
+//! compiler-owned execution source map; suspension and runtime failure
+//! control remain separate capabilities.
 
 use serde::{Deserialize, Serialize};
 
@@ -61,10 +62,14 @@ pub struct DebugSourceBinding {
     /// coordinates. This is not claimed to be a runtime failure location.
     pub source_span: RangeInfo,
     pub symbol_resolution: DebugBindingResolution,
-    /// Populated only when the compiler/runtime supplies a precise failing
-    /// operation location. The current service intentionally leaves it empty.
+    /// Populated only when a caller supplies a precise failing operation
+    /// location. Declaration queries intentionally leave it empty.
     pub failure_location: Option<RangeInfo>,
     pub runtime_operation_identity: Option<String>,
+    /// Exact operation span when `runtime_operation_identity` resolves in the
+    /// compiler-owned execution source map. This is distinct from the
+    /// subject/declaration `source_span` for function and test queries.
+    pub runtime_operation_source_span: Option<RangeInfo>,
     pub runtime_operation_resolution: DebugCapabilityState,
     pub failure_location_resolution: DebugCapabilityState,
     pub breakpoint_resolution: DebugCapabilityState,
