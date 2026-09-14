@@ -115,6 +115,55 @@ fn debug_source_binding_reuses_compiler_test_identity_and_stable_span() {
 }
 
 #[test]
+fn debug_source_binding_resolves_compiler_operation_span() {
+    let svc = LanguageService::default();
+    let uri = "untitled:debug-operation-binding";
+    svc.did_open(
+        uri,
+        1,
+        "mncs 0.17;\nmodule examples.debug;\n\nfn increment(value: i64) -> (result: i64) {\n    return value + 1;\n}\n\nfn wrapper(value: i64) -> (result: i64) {\n    return increment(value);\n}\n"
+            .to_owned(),
+    )
+    .expect("open source");
+
+    let snapshot = svc.snapshot(uri).expect("snapshot");
+    let source_map = snapshot
+        .front_end
+        .execution_source_map
+        .as_ref()
+        .expect("execution source map");
+    let operation = source_map
+        .operations
+        .iter()
+        .find(|operation| operation.source_span.is_some())
+        .expect("source-backed operation");
+    let operation_identity = operation.identity.0.clone();
+    let operation_span = operation.source_span.expect("operation span");
+
+    let response = svc
+        .debug_source_binding(uri, Some(&operation_identity), None, None)
+        .expect("operation binding");
+    let binding = response.binding.expect("binding");
+    assert_eq!(
+        binding.runtime_operation_identity.as_deref(),
+        Some(operation_identity.as_str())
+    );
+    let runtime_span = binding
+        .runtime_operation_source_span
+        .expect("runtime operation source span");
+    assert_eq!(runtime_span.start_byte, operation_span.start);
+    assert_eq!(runtime_span.end_byte, operation_span.end);
+    assert_eq!(
+        binding.runtime_operation_resolution.status,
+        DebugCapabilityStatus::Supported
+    );
+    assert_eq!(
+        binding.breakpoint_resolution.status,
+        DebugCapabilityStatus::PartiallySupported
+    );
+}
+
+#[test]
 fn diagnostics_preserve_authoritative_codes_stages_and_spans() {
     let svc = service();
     let response = svc

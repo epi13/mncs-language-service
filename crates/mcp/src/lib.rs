@@ -248,7 +248,7 @@ impl MncsSemanticServer {
     }
 
     #[tool(
-        description = "Project a compiler-owned module/function/first-class-test identity into the shared mncs-debug source-binding vocabulary. Returns the exact source artifact identity and dual-coordinate declaration span, while reporting runtime operation, failure-location, and live-breakpoint support honestly. Resolve by identity or line+character."
+        description = "Project a compiler-owned module/function/first-class-test or execution-operation identity into the shared mncs-debug source-binding vocabulary. Returns exact source artifact and operation spans from mncs.execution-source-map/1 while reporting failure-location and live-suspension support honestly. Resolve by identity or line+character."
     )]
     async fn debug_source_binding(
         &self,

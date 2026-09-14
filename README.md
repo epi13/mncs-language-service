@@ -55,8 +55,9 @@ What works today:
 - obligations with preserved `PASS` / `FAIL` / `UNKNOWN` status;
 - `debug_source_binding`, a shared source/debug projection that reuses
   compiler-owned module, function, first-class-test, source-span, and source
-  identity fields while reporting runtime-operation, failure-location, and
-  live-breakpoint support honestly;
+  identity fields; execution-operation identities join the exact
+  `mncs.execution-source-map/1` operation span while failure-location and
+  live-breakpoint support remain honest capability states;
 - experimental `native_obligations`: projects the authoritative obligation
   statuses into a bounded MNCS query, executes the real
   `mncs-research-bytecode` backend, validates identity-bound results, and
@@ -146,8 +147,8 @@ LSP and MCP are adapters over one shared resident core. Neither protocol defines
 - the MNCS-native query adapter source and its fail-closed differential policy;
 - service observability and lifecycle;
 - the shared `mncs.debug-source-binding/1` source projection consumed by
-  `mncs-debug` and exposed through MCP without claiming live breakpoint or
-  runtime-frame support.
+  `mncs-debug` and exposed through MCP without claiming live breakpoint
+  execution or runtime suspension support.
 
 A language semantic capability required by the service is added to `mncs-language` and consumed here rather than reimplemented here. The service currently consumes one such upstream API beyond main's baseline: the [`NameResolutionIndex`](https://github.com/epi13/mncs-language/pull/…) recorded by elaboration (`mncs-compiler`), which provides authoritative use-site→declaration binding without duplicating scoping rules.
 
