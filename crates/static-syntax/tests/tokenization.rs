@@ -212,6 +212,18 @@ fn function_signature_classifies_name_parameters_and_arrow() {
 }
 
 #[test]
+fn first_class_test_signature_classifies_name_parameters_and_arrow() {
+    let doc = Doc::parse(
+        "mncs 0.17;\nmodule examples.signature;\ntest checked_arithmetic() -> (result: i64) { return 0; }\n",
+    );
+    doc.assert_scope("test", "keyword.declaration.test.mncs")
+        .assert_scope("checked_arithmetic", "entity.name.function.test.mncs")
+        .assert_scope("->", "keyword.operator.arrow.mncs")
+        .assert_scope("result", "variable.parameter.mncs")
+        .assert_scope("i64", "entity.name.type.mncs");
+}
+
+#[test]
 fn multi_line_signature_stays_in_signature_context() {
     let source = fixture("lineage/synthetic-lineage-g0.mncs");
     let doc = Doc::parse(&source);

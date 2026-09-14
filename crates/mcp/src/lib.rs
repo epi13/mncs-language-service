@@ -32,6 +32,22 @@ pub struct PositionParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct DebugSourceBindingParams {
+    /// URI of an MNCS source document known to the service.
+    pub uri: String,
+    /// Function, test declaration, test case, or module identity. Provide
+    /// this or `line` plus `character`, but not both.
+    #[serde(default)]
+    pub identity: Option<String>,
+    /// Zero-based source line used when resolving by position.
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// Zero-based UTF-16 code-unit column used when resolving by position.
+    #[serde(default)]
+    pub character: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReferencesParams {
     pub uri: String,
     pub line: u32,
@@ -226,6 +242,28 @@ impl MncsSemanticServer {
     ) -> Result<CallToolResult, McpError> {
         let uri = self.resolve_uri(&uri);
         match self.service().subjects_at(&uri, line, character) {
+            Ok(response) => Ok(self.answered(serialize(&response))),
+            Err(error) => Ok(self.failed(error.to_string())),
+        }
+    }
+
+    #[tool(
+        description = "Project a compiler-owned module/function/first-class-test identity into the shared mncs-debug source-binding vocabulary. Returns the exact source artifact identity and dual-coordinate declaration span, while reporting runtime operation, failure-location, and live-breakpoint support honestly. Resolve by identity or line+character."
+    )]
+    async fn debug_source_binding(
+        &self,
+        Parameters(DebugSourceBindingParams {
+            uri,
+            identity,
+            line,
+            character,
+        }): Parameters<DebugSourceBindingParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let uri = self.resolve_uri(&uri);
+        match self
+            .service()
+            .debug_source_binding(&uri, identity.as_deref(), line, character)
+        {
             Ok(response) => Ok(self.answered(serialize(&response))),
             Err(error) => Ok(self.failed(error.to_string())),
         }

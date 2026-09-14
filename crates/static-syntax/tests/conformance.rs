@@ -25,10 +25,11 @@ use mncs_syntax::{SourceArtifactKind, SourceEnvelope, TokenKind};
 /// words, every operator and punctuation form, both comment styles (with
 /// nesting), version and integer literals, record spread, and unicode
 /// identifiers.
-const PROBE: &str = r#"mncs 0.13;
+const PROBE: &str = r#"mncs 0.17;
 // line comment with -> => == != <= >= symbols inside
 /* block /* nested */ comment still open */ module probe.everything;
 use lib.evidence;
+test test_probe() -> (result: i64) { return 0; }
 record Pair { left: i64, right: bool }
 enum Verdict { PASS, FAIL, UNKNOWN }
 fn probe(alpha: i64, beta: bool) -> (result: i64)
@@ -102,7 +103,7 @@ fn scope_for_span(
 fn every_manifest_spelling_lexes_as_its_authoritative_kind() {
     // Build one snippet per spelling so each word appears as its own token.
     for (spelling, expected_kind) in KEYWORD_SPELLINGS {
-        let source = format!("mncs 0.5;\nmodule t;\n{spelling}\n");
+        let source = format!("mncs 0.17;\nmodule t;\n{spelling}\n");
         let tokens = authoritative_tokens(&source);
         assert!(
             tokens.iter().any(|(_, kind)| kind == expected_kind),
@@ -250,7 +251,7 @@ fn comments_are_scoped_as_comments() {
 fn every_supported_profile_header_is_recognized() {
     for profile in [
         "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "0.10", "0.11", "0.12",
-        "0.13",
+        "0.13", "0.14", "0.15", "0.16", "0.17",
     ] {
         let source = format!("mncs {profile};\nmodule t;\n");
         let tokens = authoritative_tokens(&source);

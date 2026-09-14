@@ -22,6 +22,7 @@ pub const KEYWORD_SPELLINGS: &[(&str, TokenKind)] = &[
     ("mncs", TokenKind::MncsKeyword),
     ("module", TokenKind::ModuleKeyword),
     ("fn", TokenKind::FunctionKeyword),
+    ("test", TokenKind::TestKeyword),
     ("return", TokenKind::ReturnKeyword),
     ("let", TokenKind::LetKeyword),
     ("if", TokenKind::IfKeyword),
@@ -60,6 +61,7 @@ pub fn is_keyword_kind(kind: TokenKind) -> bool {
         TokenKind::MncsKeyword
             | TokenKind::ModuleKeyword
             | TokenKind::FunctionKeyword
+            | TokenKind::TestKeyword
             | TokenKind::ReturnKeyword
             | TokenKind::LetKeyword
             | TokenKind::IfKeyword
@@ -107,6 +109,7 @@ pub fn expected_scope(kind: TokenKind) -> &'static str {
         TokenKind::MncsKeyword => "keyword.other.header.mncs",
         TokenKind::ModuleKeyword => "keyword.declaration.module.mncs",
         TokenKind::FunctionKeyword => "keyword.declaration.function.mncs",
+        TokenKind::TestKeyword => "keyword.declaration.test.mncs",
         TokenKind::ReturnKeyword => "keyword.control.flow.return.mncs",
         TokenKind::LetKeyword => "keyword.declaration.variable.mncs",
         TokenKind::IfKeyword => "keyword.control.flow.if.mncs",

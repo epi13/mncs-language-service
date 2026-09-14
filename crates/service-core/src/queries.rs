@@ -16,6 +16,10 @@ pub use crate::indexes::SymbolKind;
 
 use crate::analysis::DocumentAnalysis;
 use crate::coords::PositionMap;
+use crate::debug_binding::{
+    DebugBindingResolution, DebugCapabilityState, DebugCapabilityStatus, DebugSourceBinding,
+    DebugSourceBindingResponse, DEBUG_SOURCE_BINDING_SCHEMA_VERSION,
+};
 use crate::document::DocumentStore;
 use crate::indexes;
 use crate::render::{compute_completion, compute_semantic_tokens, render_hover_markdown};
@@ -779,6 +783,133 @@ impl LanguageService {
             status,
             snapshot: Some(snapshot_info(uri, &snapshot)),
             occurrences,
+        })
+    }
+
+    /// Project one compiler-owned source subject into the shared debugger
+    /// vocabulary. `identity` may be a function, test declaration, test case,
+    /// or module identity. Alternatively, provide a zero-based source
+    /// position. The response is deliberately honest about the facts the
+    /// current compiler/runtime does not emit yet: declaration spans are
+    /// stable, but runtime operation/failure spans and live breakpoints are
+    /// unsupported.
+    pub fn debug_source_binding(
+        &self,
+        uri: &str,
+        identity: Option<&str>,
+        line: Option<u32>,
+        character: Option<u32>,
+    ) -> Result<DebugSourceBindingResponse, ServiceError> {
+        let has_identity = identity.is_some();
+        let has_position = line.is_some() || character.is_some();
+        if has_identity == has_position || (has_position && (line.is_none() || character.is_none()))
+        {
+            return Err(ServiceError::InvalidRequest {
+                reason: "debug_source_binding requires exactly one identity or line+character"
+                    .to_owned(),
+            });
+        }
+
+        let snapshot = self.snapshot(uri)?;
+        let text = snapshot.text();
+        let inventory = snapshot.front_end.test_inventory.as_ref();
+        let (test, target) = if let Some(identity) = identity {
+            let test = inventory.and_then(|inventory| {
+                inventory.tests.iter().find(|entry| {
+                    entry.test_case_identity.as_str() == identity
+                        || entry.declaration_identity.as_str() == identity
+                        || entry.function_identity.as_str() == identity
+                })
+            });
+            let mut target = snapshot.symbols.symbols.iter().position(|entry| {
+                entry
+                    .identity
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.as_str() == identity)
+            });
+            let module = module_name(&snapshot);
+            if target.is_none() && identity == mncs_model::module_id(&module).as_str() {
+                target = snapshot
+                    .symbols
+                    .symbols
+                    .iter()
+                    .position(|entry| entry.kind == SymbolKind::Module);
+            }
+            (test, target)
+        } else {
+            let byte = snapshot.positions.offset_of(
+                text,
+                line.expect("validated line"),
+                character.expect("validated character"),
+            );
+            let target = self.primary_symbol_index(&snapshot, byte);
+            let test = inventory.and_then(|inventory| {
+                inventory
+                    .tests
+                    .iter()
+                    .find(|entry| entry.source_span.start <= byte && byte <= entry.source_span.end)
+            });
+            (test, target)
+        };
+
+        let target_entry = target.map(|index| &snapshot.symbols.symbols[index]);
+        if target_entry.is_none() && test.is_none() {
+            return Err(ServiceError::Unresolved {
+                reason: "identity or position does not resolve to a compiler-owned source subject"
+                    .to_owned(),
+            });
+        }
+
+        let module = module_name(&snapshot);
+        let function_name = test.map(|entry| entry.name.clone()).or_else(|| {
+            target_entry
+                .filter(|entry| entry.kind == SymbolKind::Function)
+                .map(|entry| entry.name.clone())
+        });
+        let function_identity = test
+            .map(|entry| entry.function_identity.0.clone())
+            .or_else(|| {
+                target_entry.and_then(|entry| entry.identity.as_ref().map(|id| id.0.clone()))
+            });
+        let test_declaration_identity = test.map(|entry| entry.declaration_identity.0.clone());
+        let test_case_identity = test.map(|entry| entry.test_case_identity.0.clone());
+        let source_span = test
+            .map(|entry| entry.source_span)
+            .or_else(|| target_entry.map(|entry| entry.full_span))
+            .expect("subject or test supplied a span");
+
+        let binding = DebugSourceBinding {
+            schema_version: DEBUG_SOURCE_BINDING_SCHEMA_VERSION.to_owned(),
+            source_identity: snapshot.source_identity.clone(),
+            uri: uri.to_owned(),
+            language_profile: snapshot.language_profile.clone(),
+            module_name: module.clone(),
+            module_identity: mncs_model::module_id(&module).0,
+            function_name,
+            function_identity,
+            test_declaration_identity,
+            test_case_identity,
+            source_span: snapshot.positions.range_of(text, source_span),
+            symbol_resolution: DebugBindingResolution::Exact,
+            failure_location: None,
+            runtime_operation_identity: None,
+            runtime_operation_resolution: DebugCapabilityState {
+                status: DebugCapabilityStatus::Unsupported,
+                reason: "the compiler/runtime does not yet emit stable operation spans or operation identities".to_owned(),
+            },
+            failure_location_resolution: DebugCapabilityState {
+                status: DebugCapabilityStatus::Unsupported,
+                reason: "failure locations remain debugger/runtime evidence, not declaration-span guesses".to_owned(),
+            },
+            breakpoint_resolution: DebugCapabilityState {
+                status: DebugCapabilityStatus::Unsupported,
+                reason: "live breakpoint resolution is not implemented; clients may use the exact source_span as a navigation anchor".to_owned(),
+            },
+        };
+        Ok(DebugSourceBindingResponse {
+            status: ResponseStatus::Answered,
+            snapshot: Some(snapshot_info(uri, &snapshot)),
+            binding: Some(binding),
         })
     }
 
@@ -1888,6 +2019,22 @@ pub(crate) fn snapshot_info(uri: &str, snapshot: &DocumentAnalysis) -> SnapshotI
         language_profile: snapshot.language_profile.clone(),
         current: true,
     }
+}
+
+fn module_name(snapshot: &DocumentAnalysis) -> String {
+    snapshot
+        .front_end
+        .ast
+        .as_ref()
+        .map(|ast| ast.module.text.clone())
+        .or_else(|| {
+            snapshot
+                .front_end
+                .program
+                .as_ref()
+                .map(|program| program.module.clone())
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn summarize(uri: &str, snapshot: &DocumentAnalysis, index: usize) -> SymbolSummary {

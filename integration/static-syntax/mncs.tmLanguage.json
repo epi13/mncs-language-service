@@ -29,6 +29,9 @@
             "include": "#function-signature"
         },
         {
+            "include": "#test-signature"
+        },
+        {
             "include": "#statements-and-expressions"
         }
     ],
@@ -353,6 +356,76 @@
                 },
                 {
                     "include": "#contract-metamorphic"
+                },
+                {
+                    "include": "#capability-declaration"
+                },
+                {
+                    "match": "->",
+                    "name": "keyword.operator.arrow.mncs"
+                },
+                {
+                    "match": "([_\\p{L}][_\\p{L}\\p{N}]*)\\s*(:)\\s*([_\\p{L}][_\\p{L}\\p{N}]*)",
+                    "captures": {
+                        "1": {
+                            "name": "variable.parameter.mncs"
+                        },
+                        "2": {
+                            "name": "punctuation.separator.colon.mncs"
+                        },
+                        "3": {
+                            "name": "entity.name.type.mncs"
+                        }
+                    }
+                },
+                {
+                    "match": "\\(",
+                    "name": "punctuation.section.parentheses.begin.mncs"
+                },
+                {
+                    "match": "\\)",
+                    "name": "punctuation.section.parentheses.end.mncs"
+                },
+                {
+                    "match": ",",
+                    "name": "punctuation.separator.comma.mncs"
+                }
+            ]
+        },
+        "test-signature": {
+            "begin": "\\b(test)\\s+([_\\p{L}][_\\p{L}\\p{N}]*)",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.declaration.test.mncs"
+                },
+                "2": {
+                    "name": "entity.name.function.test.mncs"
+                }
+            },
+            "end": "\\{",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.block.begin.mncs"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#line-comment"
+                },
+                {
+                    "include": "#block-comment"
+                },
+                {
+                    "include": "#effect-declaration"
+                },
+                {
+                    "include": "#contract-requires"
+                },
+                {
+                    "include": "#contract-ensures"
+                },
+                {
+                    "include": "#contract-assumes"
                 },
                 {
                     "include": "#capability-declaration"
@@ -912,7 +985,7 @@
             "name": "keyword.control.iteration.mncs"
         },
         "reserved-keywords-declaration": {
-            "match": "\\b(module|use|fn|let|enum|record|effect|capability)\\b",
+            "match": "\\b(module|use|fn|test|let|enum|record|effect|capability)\\b",
             "name": "keyword.declaration.mncs"
         },
         "reserved-keywords-misc": {

@@ -82,6 +82,7 @@ async fn lists_expected_read_only_tools() {
         "workspace_status",
         "document_diagnostics",
         "identity_at_position",
+        "debug_source_binding",
         "describe_subject",
         "find_definition",
         "find_references",
@@ -106,6 +107,36 @@ async fn lists_expected_read_only_tools() {
             );
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn debug_source_binding_preserves_snapshot_and_capability_status() {
+    let harness = spawn_server().await;
+    let result = call(
+        &harness.peer,
+        "debug_source_binding".to_owned(),
+        serde_json::json!({
+            "uri": uri_for("valid-contracts.mncs"),
+            "line": 4,
+            "character": 4
+        }),
+    )
+    .await;
+    assert!(
+        result.is_error.is_none() || !result.is_error.unwrap(),
+        "{result:?}"
+    );
+    let payload = result.structured_content.expect("structured binding");
+    assert_eq!(payload["status"]["kind"], "answered");
+    assert!(payload["binding"]["source_identity"]
+        .as_str()
+        .expect("source identity")
+        .starts_with("mncs:source:artifact:"));
+    assert_eq!(payload["binding"]["module_name"], "examples.contracts");
+    assert_eq!(
+        payload["binding"]["runtime_operation_resolution"]["status"],
+        "unsupported"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

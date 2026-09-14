@@ -2,7 +2,7 @@
 //! snapshots, invalidation, navigation, diagnostics, obligations, tokens,
 //! completion, and failure behavior against representative MNCS fixtures.
 
-use mncs_service_core::{LanguageService, ResponseStatus, SymbolKind};
+use mncs_service_core::{DebugCapabilityStatus, LanguageService, ResponseStatus, SymbolKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -66,6 +66,51 @@ fn snapshot_identity_binds_to_exact_content_and_is_reused() {
     assert!(
         !third.valid(),
         "edited-away binding must surface as invalid"
+    );
+}
+
+#[test]
+fn debug_source_binding_reuses_compiler_test_identity_and_stable_span() {
+    let svc = LanguageService::default();
+    let uri = "untitled:debug-source-binding";
+    svc.did_open(
+        uri,
+        1,
+        "mncs 0.17;\nmodule examples.debug;\ntest sample() -> (result: i64) { return 42; }\n"
+            .to_owned(),
+    )
+    .expect("open source");
+
+    let response = svc
+        .debug_source_binding(uri, None, Some(2), Some(6))
+        .expect("debug binding");
+    assert_eq!(response.status, ResponseStatus::Answered);
+    let binding = response.binding.expect("binding");
+    assert_eq!(binding.schema_version, "mncs.debug-source-binding/1");
+    assert!(binding.source_identity.starts_with("mncs:source:artifact:"));
+    assert_eq!(binding.module_name, "examples.debug");
+    assert!(binding.module_identity.starts_with("mncs:"));
+    assert_eq!(binding.function_name.as_deref(), Some("sample"));
+    assert!(binding.function_identity.is_some());
+    assert!(binding.test_declaration_identity.is_some());
+    assert!(binding.test_case_identity.is_some());
+    assert_eq!(binding.source_span.start_line, 2);
+    assert_eq!(binding.failure_location, None);
+    assert_eq!(
+        binding.runtime_operation_resolution.status,
+        DebugCapabilityStatus::Unsupported
+    );
+    assert_eq!(
+        binding.breakpoint_resolution.status,
+        DebugCapabilityStatus::Unsupported
+    );
+
+    let by_test_case = svc
+        .debug_source_binding(uri, binding.test_case_identity.as_deref(), None, None)
+        .expect("test case binding");
+    assert_eq!(
+        by_test_case.binding.expect("binding").source_identity,
+        binding.source_identity
     );
 }
 

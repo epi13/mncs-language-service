@@ -137,3 +137,16 @@ Before semantic refactoring or patch application is considered mature, the servi
 - clear distinction between proposal and promotion.
 
 Until then, adapters should remain conservative about write capabilities.
+## Shared debugger source projection
+
+`mncs.debug-source-binding/1` is the protocol-neutral source location
+projection shared with `mncs-debug`. It binds a resident source snapshot to
+the compiler-owned module/function/test declaration identity and an exact
+dual-coordinate declaration span. Runtime operation, failure-location, and
+breakpoint-resolution fields are capability-state objects; unsupported live
+debugger behavior is never represented as a resolved source location.
+
+The MCP `debug_source_binding` tool accepts either one exact semantic identity
+or a line/character position. LSP adapters can use the same core query. This
+keeps source navigation useful today while leaving stepping and breakpoint
+semantics to the debugger/runtime layers that can actually establish them.

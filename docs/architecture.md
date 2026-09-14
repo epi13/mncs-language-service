@@ -56,9 +56,13 @@ A protocol-neutral semantic interaction model between the resident core and prot
 
 This layer should prevent LSP, MCP, or another transport from becoming the service's internal ontology.
 
-Requests and responses should be able to carry exact identities, snapshot references, evidence state, unresolved status, and semantic relationships where those concepts exist in the language.
-
-The exact schema is deliberately not frozen yet.
+Requests and responses carry exact identities, snapshot references, evidence
+state, unresolved status, and semantic relationships where those concepts
+exist in the language. The `mncs.debug-source-binding/1` projection is the
+current shared vocabulary for source/test locations: compiler-owned source,
+module, function, declaration, and test identities are preserved, while
+runtime operation mapping, failure locations, and live breakpoint resolution
+remain explicit capability states rather than inferred spans.
 
 ### 4. Protocol adapters
 
@@ -71,6 +75,10 @@ Expected adapters include:
 - a future MNCS-native interface for richer ecosystem coordination.
 
 Adapters may project or simplify information for their clients, but must not strengthen semantic claims.
+
+The service does not implement debugger behavior. Its `debug_source_binding`
+query is a source projection consumed by `mncs-debug`, LSP, and MCP clients so
+those surfaces do not create competing identity or span schemas.
 
 ## Dependency direction
 

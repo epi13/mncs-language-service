@@ -14,6 +14,7 @@ mod actions;
 mod analysis;
 mod candidate;
 mod coords;
+mod debug_binding;
 mod document;
 pub mod edits;
 mod error;
@@ -34,6 +35,10 @@ pub use candidate::{
     ObligationDelta, ObligationStatusChange, SemanticDelta, StaleEvidenceItem,
 };
 pub use coords::{PositionInfo, PositionMap, RangeInfo};
+pub use debug_binding::{
+    DebugBindingResolution, DebugCapabilityState, DebugCapabilityStatus, DebugSourceBinding,
+    DebugSourceBindingResponse, DEBUG_SOURCE_BINDING_SCHEMA_VERSION,
+};
 pub use document::{DocumentStore, MAX_DISCOVERED_DOCUMENTS, MAX_DOCUMENT_BYTES};
 pub use edits::{TextChange, TextRange};
 pub use error::ServiceError;
