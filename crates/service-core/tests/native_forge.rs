@@ -12,7 +12,7 @@ fn fixtures_dir() -> PathBuf {
 }
 
 fn forge_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-forge-mcp")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-forge")
 }
 
 fn language_library() -> PathBuf {
