@@ -21,6 +21,7 @@ mod error;
 pub mod format;
 mod indexes;
 pub mod intel;
+pub mod language_knowledge;
 mod modules;
 mod native_filter;
 mod native_query;
@@ -48,6 +49,10 @@ pub use intel::{
     CallHierarchyCallsResponse, CallHierarchyEdge, CallHierarchyItem, InlayHintItem, InlayHintKind,
     InlayHintsResponse, PrepareCallHierarchyResponse, SelectionChain, SelectionRangesResponse,
     SignatureHelpResponse, SignatureParameter,
+};
+pub use language_knowledge::{
+    LanguageCapabilitiesResponse, LanguageCapabilityIndex, LanguageDelta, LanguageModule,
+    LanguageProvenance, LanguageSymbol, LanguageTopic,
 };
 pub use native_filter::{symbol_kind_tag, NativeFilterSummary, FILTER_PADDING_TAG};
 pub use native_query::NativeStatusSummary;

@@ -15,6 +15,15 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
 }
 
+fn language_library() -> PathBuf {
+    let root = std::env::var_os("MNCS_LANGUAGE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language")
+        });
+    root.join("library")
+}
+
 struct ClientHarness {
     /// Held to keep the MCP session alive.
     _client: rmcp::service::RunningService<rmcp::RoleClient, ()>,
@@ -80,6 +89,7 @@ async fn lists_expected_read_only_tools() {
     let names: Vec<&str> = tools.tools.iter().map(|tool| tool.name.as_ref()).collect();
     for expected in [
         "workspace_status",
+        "language_capabilities",
         "document_diagnostics",
         "identity_at_position",
         "debug_source_binding",
@@ -270,7 +280,7 @@ async fn identity_describe_and_dependencies_agree() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn native_obligations_executes_through_the_real_tool_surface() {
-    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language/library");
+    let library = language_library();
     std::env::set_var("MNCS_LIBRARY_PATH", library);
 
     let harness = spawn_server().await;
@@ -289,7 +299,7 @@ async fn native_obligations_executes_through_the_real_tool_surface() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn native_kind_count_executes_through_the_real_tool_surface() {
-    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language/library");
+    let library = language_library();
     if !library.join("core/sequences.mncs").is_file() {
         return;
     }

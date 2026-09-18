@@ -137,6 +137,29 @@ pub struct CandidateParams {
     pub candidate_text: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LanguageCapabilitiesParams {
+    /// Optional case-insensitive topic filter such as `effects` or `identity`.
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// Optional case-insensitive symbol or module filter.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Optional exact source profile filter for library modules.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Return profiles newer than this profile as a compact delta projection.
+    #[serde(default)]
+    pub delta_from: Option<String>,
+    /// Bound returned records (default 16).
+    #[serde(default = "default_language_capability_limit")]
+    pub max_items: u32,
+}
+
+fn default_language_capability_limit() -> u32 {
+    16
+}
+
 /// The resident MNCS semantic service exposed through MCP.
 #[derive(Clone)]
 pub struct MncsSemanticServer {
@@ -213,6 +236,31 @@ impl MncsSemanticServer {
     async fn workspace_status(&self) -> Result<CallToolResult, McpError> {
         let status = self.service().workspace_status();
         Ok(self.answered(serialize(&status)))
+    }
+
+    #[tool(
+        description = "Query the authoritative mncs-language capability index. Returns a compact current-language capsule, filtered topic or symbol facts, canonical examples, provenance identities, and an optional profile delta without repository-wide reference scanning."
+    )]
+    async fn language_capabilities(
+        &self,
+        Parameters(LanguageCapabilitiesParams {
+            topic,
+            symbol,
+            profile,
+            delta_from,
+            max_items,
+        }): Parameters<LanguageCapabilitiesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.service().language_capabilities(
+            topic.as_deref(),
+            symbol.as_deref(),
+            profile.as_deref(),
+            delta_from.as_deref(),
+            max_items as usize,
+        ) {
+            Ok(response) => Ok(self.answered(serialize(&response))),
+            Err(error) => Ok(self.failed(error.to_string())),
+        }
     }
 
     #[tool(

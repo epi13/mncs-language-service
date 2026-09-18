@@ -10,6 +10,15 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
 }
 
+fn language_library() -> PathBuf {
+    let root = std::env::var_os("MNCS_LANGUAGE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language")
+        });
+    root.join("library")
+}
+
 fn fixture_uri(name: &str) -> String {
     format!("file://{}", fixtures_dir().join(name).display())
 }
@@ -380,7 +389,7 @@ fn obligations_preserve_pass_fail_unknown() {
 
 #[test]
 fn native_obligations_differentially_agree_with_rust_control() {
-    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language/library");
+    let library = language_library();
     std::env::set_var("MNCS_LIBRARY_PATH", library);
 
     let svc = service();
@@ -414,7 +423,7 @@ fn native_obligations_differentially_agree_with_rust_control() {
 
 #[test]
 fn native_obligations_preserves_empty_unknown_summary() {
-    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language/library");
+    let library = language_library();
     std::env::set_var("MNCS_LIBRARY_PATH", library);
 
     let svc = service();

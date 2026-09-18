@@ -11,7 +11,12 @@ fn configure_ravel_workspace() -> Option<PathBuf> {
     // and CI exercises the equivalent fixtures instead. The standard-library
     // root is exported exactly as an external consumer would export it.
     let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../RAVEL/mncs/workspace");
-    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language/library");
+    let language_root = std::env::var_os("MNCS_LANGUAGE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language")
+        });
+    let library = language_root.join("library");
     if candidate.join("ravel/core.mncs").is_file() && library.join("core/status.mncs").is_file() {
         std::env::set_var("MNCS_LIBRARY_PATH", &library);
         Some(candidate)

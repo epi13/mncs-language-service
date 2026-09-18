@@ -73,6 +73,10 @@ What works today:
   plus `MNCS_LIBRARY_PATH` standard-library roots), so editing an importing
   module yields real deltas instead of false unresolvable-import diagnostics;
 - a read-only MCP tool surface for agents over the same resident state;
+- `language_capabilities`, a bounded query over the authoritative
+  `mncs-language/docs/language-capabilities.json` index. It provides a compact
+  capsule, topic/symbol expansion, profile deltas, and source provenance so
+  agents do not rediscover language facts by scanning the repository;
 - **static syntax + GitHub/Linguist readiness (Phase 4.5)**: a production
   TextMate grammar (`source.mncs`) with mechanical drift protection against
   the authoritative lexer, plus prepared Linguist language metadata, licensed
@@ -151,6 +155,11 @@ LSP and MCP are adapters over one shared resident core. Neither protocol defines
   execution or runtime suspension support.
 
 A language semantic capability required by the service is added to `mncs-language` and consumed here rather than reimplemented here. The service currently consumes one such upstream API beyond main's baseline: the [`NameResolutionIndex`](https://github.com/epi13/mncs-language/pull/…) recorded by elaboration (`mncs-compiler`), which provides authoritative use-site→declaration binding without duplicating scoping rules.
+
+The language capability index follows the same boundary: compiler/library facts
+and curated guidance are owned by `mncs-language`; this service is only the
+bounded query projection. `MNCS_LANGUAGE_CAPABILITY_INDEX` and
+`MNCS_LANGUAGE_ROOT` are explicit discovery overrides for isolated checkouts.
 
 The module resolver also validates discovered source declarations against their
 requested import names (including version-tail compatibility). This keeps the

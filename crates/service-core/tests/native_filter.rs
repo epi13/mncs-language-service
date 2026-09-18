@@ -9,7 +9,12 @@ use mncs_service_core::{LanguageService, ResponseStatus, SymbolKind};
 use std::path::PathBuf;
 
 fn language_library() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language/library")
+    let root = std::env::var_os("MNCS_LANGUAGE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language")
+        });
+    root.join("library")
 }
 
 fn with_library() -> bool {

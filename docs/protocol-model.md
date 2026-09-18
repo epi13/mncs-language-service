@@ -34,7 +34,7 @@ Richer MNCS metadata remains available to editor clients through experimental
 MCP provides an interoperable agent-facing adapter to the same service
 (`crates/mcp`). The initial emphasis is read-only semantic inspection.
 
-Implemented tools: `workspace_status`, `document_diagnostics`,
+Implemented tools include `workspace_status`, `language_capabilities`, `document_diagnostics`,
 `identity_at_position`, `describe_subject`, `find_definition`,
 `find_references`, `list_symbols`, `semantic_dependencies`, `obligations`, and
 the experimental bounded `context_packet`. See `docs/agent-interface.md` for
