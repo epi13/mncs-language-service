@@ -701,6 +701,7 @@ impl LanguageService {
         symbol: Option<&str>,
         profile: Option<&str>,
         delta_from: Option<&str>,
+        known_identity: Option<&str>,
         max_items: usize,
     ) -> Result<crate::language_knowledge::LanguageCapabilitiesResponse, ServiceError> {
         crate::language_knowledge::query(
@@ -709,6 +710,7 @@ impl LanguageService {
             symbol,
             profile,
             delta_from,
+            known_identity,
             max_items,
         )
     }

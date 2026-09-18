@@ -4,7 +4,7 @@
 //! This crate adds bounded topic/symbol/profile filtering and delta selection;
 //! it does not maintain a second language reference.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,12 +23,27 @@ pub struct LanguageModule {
     pub source_identity: String,
     #[serde(default)]
     pub symbols: Vec<LanguageSymbol>,
+    #[serde(default)]
+    pub exports: Vec<String>,
+    #[serde(default)]
+    pub imports: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub effects: Vec<LanguageEffect>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageSymbol {
     pub kind: String,
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanguageEffect {
+    pub capability: String,
+    pub effect: String,
+    pub authorized_by: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +97,16 @@ pub struct LanguageDelta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanguageProjection {
+    pub mode: String,
+    pub layers: Vec<String>,
+    pub counts: BTreeMap<String, usize>,
+    pub complete: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageCapabilitiesResponse {
     pub schema_version: String,
     pub source_path: String,
@@ -93,6 +118,7 @@ pub struct LanguageCapabilitiesResponse {
     pub examples: Vec<serde_json::Value>,
     pub intrinsics: Vec<serde_json::Value>,
     pub provenance: Vec<LanguageProvenance>,
+    pub projection: LanguageProjection,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta: Option<LanguageDelta>,
 }
@@ -162,6 +188,7 @@ pub fn query(
     symbol: Option<&str>,
     profile: Option<&str>,
     delta_from: Option<&str>,
+    known_identity: Option<&str>,
     max_items: usize,
 ) -> Result<LanguageCapabilitiesResponse, ServiceError> {
     if max_items == 0 {
@@ -170,10 +197,45 @@ pub fn query(
         });
     }
     let (path, index) = discover(root)?;
+    if known_identity == Some(index.content_identity.as_str()) {
+        let mut counts = BTreeMap::new();
+        for key in [
+            "topics",
+            "modules",
+            "symbols",
+            "effects",
+            "examples",
+            "intrinsics",
+            "provenance",
+            "profiles",
+        ] {
+            counts.insert(key.to_owned(), 0);
+        }
+        return Ok(LanguageCapabilitiesResponse {
+            schema_version: SCHEMA.to_owned(),
+            source_path: path.to_string_lossy().into_owned(),
+            content_identity: index.content_identity,
+            current_profile: index.current_profile,
+            capsule: serde_json::Value::Object(Default::default()),
+            topics: Vec::new(),
+            modules: Vec::new(),
+            examples: Vec::new(),
+            intrinsics: Vec::new(),
+            provenance: Vec::new(),
+            projection: LanguageProjection {
+                mode: "unchanged".to_owned(),
+                layers: vec!["identity".to_owned()],
+                counts,
+                complete: true,
+                limitations: Vec::new(),
+            },
+            delta: None,
+        });
+    }
     let topic_filter = topic.map(str::to_ascii_lowercase);
     let symbol_filter = symbol.map(str::to_ascii_lowercase);
     let profile_filter = profile.map(str::to_owned);
-    let topics = index
+    let filtered_topics = index
         .topics
         .iter()
         .filter(|item| {
@@ -182,10 +244,9 @@ pub fn query(
                 .map(|needle| item.id.to_ascii_lowercase().contains(needle))
                 .unwrap_or(true)
         })
-        .take(max_items)
         .cloned()
         .collect::<Vec<_>>();
-    let modules = index
+    let filtered_modules = index
         .library_modules
         .iter()
         .filter(|item| {
@@ -205,16 +266,38 @@ pub fn query(
                 .unwrap_or(true);
             matches_symbol && matches_profile
         })
+        .cloned()
+        .collect::<Vec<_>>();
+    let topics = filtered_topics
+        .iter()
         .take(max_items)
         .cloned()
         .collect::<Vec<_>>();
-    let examples = index.examples.iter().take(max_items).cloned().collect();
-    let intrinsics = index.intrinsics.iter().take(max_items).cloned().collect();
-    let provenance = index.provenance.iter().take(max_items).cloned().collect();
-    let delta = delta_from.map(|from| LanguageDelta {
-        from_profile: from.to_owned(),
-        to_profile: index.current_profile.clone(),
-        profiles: index
+    let modules = filtered_modules
+        .iter()
+        .take(max_items)
+        .cloned()
+        .collect::<Vec<_>>();
+    let examples = index
+        .examples
+        .iter()
+        .take(max_items)
+        .cloned()
+        .collect::<Vec<_>>();
+    let intrinsics = index
+        .intrinsics
+        .iter()
+        .take(max_items)
+        .cloned()
+        .collect::<Vec<_>>();
+    let provenance = index
+        .provenance
+        .iter()
+        .take(max_items)
+        .cloned()
+        .collect::<Vec<_>>();
+    let delta_profiles = delta_from.map(|from| {
+        index
             .profiles
             .iter()
             .filter(|profile| {
@@ -224,10 +307,50 @@ pub fn query(
                     .map(|value| version_gt(value, from))
                     .unwrap_or(false)
             })
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    let delta = delta_from.map(|from| LanguageDelta {
+        from_profile: from.to_owned(),
+        to_profile: index.current_profile.clone(),
+        profiles: delta_profiles
+            .as_ref()
+            .expect("delta profiles are present when delta_from is set")
+            .iter()
             .take(max_items)
             .cloned()
             .collect(),
     });
+    let truncated = filtered_topics.len() > max_items
+        || filtered_modules.len() > max_items
+        || index.examples.len() > max_items
+        || index.intrinsics.len() > max_items
+        || index.provenance.len() > max_items
+        || delta_profiles
+            .as_ref()
+            .is_some_and(|items| items.len() > max_items);
+    let mut counts = BTreeMap::new();
+    counts.insert("topics".to_owned(), topics.len());
+    counts.insert("modules".to_owned(), modules.len());
+    counts.insert(
+        "symbols".to_owned(),
+        modules.iter().map(|module| module.symbols.len()).sum(),
+    );
+    counts.insert(
+        "effects".to_owned(),
+        modules.iter().map(|module| module.effects.len()).sum(),
+    );
+    counts.insert("examples".to_owned(), examples.len());
+    counts.insert("intrinsics".to_owned(), intrinsics.len());
+    counts.insert("provenance".to_owned(), provenance.len());
+    counts.insert(
+        "profiles".to_owned(),
+        delta.as_ref().map(|item| item.profiles.len()).unwrap_or(0),
+    );
+    let mut limitations = Vec::new();
+    if truncated {
+        limitations.push("one or more collections are bounded by max_items".to_owned());
+    }
     Ok(LanguageCapabilitiesResponse {
         schema_version: SCHEMA.to_owned(),
         source_path: path.to_string_lossy().into_owned(),
@@ -239,6 +362,27 @@ pub fn query(
         examples,
         intrinsics,
         provenance,
+        projection: LanguageProjection {
+            mode: if delta_from.is_some() {
+                "delta".to_owned()
+            } else {
+                "full".to_owned()
+            },
+            layers: {
+                let mut layers = vec![
+                    "identity".to_owned(),
+                    "implementation".to_owned(),
+                    "evidence".to_owned(),
+                ];
+                if delta_from.is_some() {
+                    layers.push("delta".to_owned());
+                }
+                layers
+            },
+            counts,
+            complete: !truncated,
+            limitations,
+        },
         delta,
     })
 }
@@ -256,6 +400,86 @@ fn version_gt(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn fixture_root() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "mncs-language-service-capabilities-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("docs")).expect("fixture directory");
+        let index = LanguageCapabilityIndex {
+            schema_version: SCHEMA.to_owned(),
+            generator_identity: "fixture".to_owned(),
+            language: "MNCS".to_owned(),
+            current_profile: "0.18".to_owned(),
+            profile_registry_identity: "fixture-profile".to_owned(),
+            profiles: vec![
+                serde_json::json!({"version": "0.18"}),
+                serde_json::json!({"version": "0.19"}),
+            ],
+            library_modules: vec![LanguageModule {
+                module: Some("mncs.fixture".to_owned()),
+                profile: Some("0.18".to_owned()),
+                path: "fixture.mncs".to_owned(),
+                source_identity: "fixture-source".to_owned(),
+                symbols: vec![LanguageSymbol {
+                    kind: "function".to_owned(),
+                    name: "answer".to_owned(),
+                }],
+                exports: vec!["answer".to_owned()],
+                imports: vec!["mncs.fixture.dep".to_owned()],
+                capabilities: vec!["fixture_capability".to_owned()],
+                effects: vec![LanguageEffect {
+                    capability: "fixture_capability".to_owned(),
+                    effect: "fixture_effect".to_owned(),
+                    authorized_by: "fixture_capability".to_owned(),
+                }],
+            }],
+            intrinsics: vec![
+                serde_json::json!({"id": "one"}),
+                serde_json::json!({"id": "two"}),
+            ],
+            topics: vec![
+                LanguageTopic {
+                    id: "identity".to_owned(),
+                    description: "identity".to_owned(),
+                    profiles: vec!["0.18".to_owned()],
+                    modules: vec!["mncs.fixture".to_owned()],
+                    guidance: vec![],
+                },
+                LanguageTopic {
+                    id: "effects".to_owned(),
+                    description: "effects".to_owned(),
+                    profiles: vec!["0.18".to_owned()],
+                    modules: vec!["mncs.fixture".to_owned()],
+                    guidance: vec![],
+                },
+            ],
+            examples: vec![
+                serde_json::json!({"id": "one"}),
+                serde_json::json!({"id": "two"}),
+            ],
+            provenance: vec![LanguageProvenance {
+                path: "fixture.mncs".to_owned(),
+                kind: "fixture".to_owned(),
+                source_identity: "fixture-source".to_owned(),
+            }],
+            projections: serde_json::json!({}),
+            capsule: serde_json::json!({"profile": "0.18"}),
+            content_identity: "fixture-content".to_owned(),
+        };
+        fs::write(
+            root.join("docs/language-capabilities.json"),
+            serde_json::to_vec(&index).expect("fixture json"),
+        )
+        .expect("fixture index");
+        root
+    }
 
     #[test]
     fn profile_delta_is_numeric_and_not_lexical() {
@@ -265,7 +489,42 @@ mod tests {
 
     #[test]
     fn invalid_max_items_is_rejected_before_discovery() {
-        let error = query(None, None, None, None, None, 0).unwrap_err();
+        let error = query(None, None, None, None, None, None, 0).unwrap_err();
         assert!(matches!(error, ServiceError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn targeted_projection_is_smaller_and_identity_can_be_unchanged() {
+        let root = fixture_root();
+        let full = query(Some(&root), None, None, None, None, None, 16).expect("full query");
+        let targeted = query(
+            Some(&root),
+            Some("identity"),
+            Some("answer"),
+            Some("0.18"),
+            None,
+            None,
+            1,
+        )
+        .expect("targeted query");
+        let unchanged = query(
+            Some(&root),
+            None,
+            None,
+            None,
+            None,
+            Some("fixture-content"),
+            16,
+        )
+        .expect("unchanged query");
+        assert!(
+            serde_json::to_vec(&full).unwrap().len() > serde_json::to_vec(&targeted).unwrap().len()
+        );
+        assert_eq!(targeted.projection.mode, "full");
+        assert_eq!(targeted.projection.counts["symbols"], 1);
+        assert_eq!(targeted.projection.counts["effects"], 1);
+        assert_eq!(unchanged.projection.mode, "unchanged");
+        assert!(unchanged.modules.is_empty());
+        fs::remove_dir_all(root).expect("fixture cleanup");
     }
 }

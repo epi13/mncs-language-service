@@ -151,6 +151,10 @@ pub struct LanguageCapabilitiesParams {
     /// Return profiles newer than this profile as a compact delta projection.
     #[serde(default)]
     pub delta_from: Option<String>,
+    /// If this is the current content identity, return an unchanged marker
+    /// without retransmitting language facts.
+    #[serde(default)]
+    pub known_identity: Option<String>,
     /// Bound returned records (default 16).
     #[serde(default = "default_language_capability_limit")]
     pub max_items: u32,
@@ -248,6 +252,7 @@ impl MncsSemanticServer {
             symbol,
             profile,
             delta_from,
+            known_identity,
             max_items,
         }): Parameters<LanguageCapabilitiesParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -256,6 +261,7 @@ impl MncsSemanticServer {
             symbol.as_deref(),
             profile.as_deref(),
             delta_from.as_deref(),
+            known_identity.as_deref(),
             max_items as usize,
         ) {
             Ok(response) => Ok(self.answered(serialize(&response))),
