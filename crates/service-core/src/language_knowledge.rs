@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::ServiceError;
 
 const SCHEMA: &str = "mncs.language-capabilities/1";
+const DELTA_SCHEMA: &str = "mncs.language-capability-deltas/1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageModule {
@@ -91,9 +92,83 @@ pub struct LanguageCapabilityIndex {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageDelta {
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_content_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_content_identity: Option<String>,
     pub from_profile: String,
     pub to_profile: String,
     pub profiles: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub profile_changes: LanguageChangeSet,
+    #[serde(default)]
+    pub modules: LanguageChangeSet,
+    #[serde(default)]
+    pub exports: LanguageChangeSet,
+    #[serde(default)]
+    pub intrinsics: LanguageChangeSet,
+    #[serde(default)]
+    pub effects: LanguageChangeSet,
+    #[serde(default)]
+    pub capabilities: LanguageChangeSet,
+    #[serde(default)]
+    pub canonical_examples: LanguageChangeSet,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LanguageChangeSet {
+    #[serde(default)]
+    pub added: Vec<String>,
+    #[serde(default)]
+    pub changed: Vec<String>,
+    #[serde(default)]
+    pub removed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LanguageDeltaHistory {
+    schema_version: String,
+    #[allow(dead_code)]
+    retention: usize,
+    #[allow(dead_code)]
+    history_identity: String,
+    #[serde(default)]
+    deltas: Vec<LanguageDeltaEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LanguageDeltaEntry {
+    previous_content_identity: String,
+    current_content_identity: String,
+    #[serde(default)]
+    from_profile: Option<String>,
+    #[serde(default)]
+    to_profile: Option<String>,
+    #[serde(default)]
+    profiles: RawChangeSet<serde_json::Value>,
+    #[serde(default)]
+    modules: RawChangeSet<String>,
+    #[serde(default)]
+    exports: RawChangeSet<String>,
+    #[serde(default)]
+    intrinsics: RawChangeSet<String>,
+    #[serde(default)]
+    effects: RawChangeSet<String>,
+    #[serde(default)]
+    capabilities: RawChangeSet<String>,
+    #[serde(default)]
+    canonical_examples: RawChangeSet<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RawChangeSet<T> {
+    #[serde(default)]
+    added: Vec<T>,
+    #[serde(default)]
+    changed: Vec<T>,
+    #[serde(default)]
+    removed: Vec<T>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +257,136 @@ pub fn load(path: &Path) -> Result<LanguageCapabilityIndex, String> {
     Ok(index)
 }
 
+fn load_delta_history(path: &Path) -> Option<LanguageDeltaHistory> {
+    let history_path = path.with_file_name("language-capability-deltas.json");
+    let text = fs::read_to_string(history_path).ok()?;
+    let history: LanguageDeltaHistory = serde_json::from_str(&text).ok()?;
+    if history.schema_version != DELTA_SCHEMA
+        || history.history_identity.is_empty()
+        || history.retention == 0
+        || history.deltas.len() > history.retention
+    {
+        return None;
+    }
+    Some(history)
+}
+
+fn merge_strings(target: &mut Vec<String>, values: &[String]) {
+    target.extend(values.iter().cloned());
+    target.sort();
+    target.dedup();
+}
+
+fn merge_change_set(target: &mut LanguageChangeSet, source: &RawChangeSet<String>) {
+    merge_strings(&mut target.added, &source.added);
+    merge_strings(&mut target.changed, &source.changed);
+    merge_strings(&mut target.removed, &source.removed);
+}
+
+fn merge_profile_changes(target: &mut LanguageChangeSet, source: &RawChangeSet<serde_json::Value>) {
+    let name = |value: &serde_json::Value| {
+        value
+            .get("version")
+            .and_then(|item| item.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| value.to_string())
+    };
+    for value in &source.added {
+        target.added.push(name(value));
+    }
+    for value in &source.changed {
+        target.changed.push(name(value));
+    }
+    for value in &source.removed {
+        target.removed.push(name(value));
+    }
+    target.added.sort();
+    target.added.dedup();
+    target.changed.sort();
+    target.changed.dedup();
+    target.removed.sort();
+    target.removed.dedup();
+}
+
+fn identity_delta(
+    path: &Path,
+    index: &LanguageCapabilityIndex,
+    from: &str,
+    max_items: usize,
+) -> Option<LanguageDelta> {
+    let history = load_delta_history(path)?;
+    let mut chain = Vec::new();
+    let mut cursor = index.content_identity.clone();
+    while cursor != from {
+        let item = history
+            .deltas
+            .iter()
+            .rev()
+            .find(|delta| delta.current_content_identity == cursor)?;
+        chain.push(item.clone());
+        cursor = item.previous_content_identity.clone();
+        if chain.len() > history.retention {
+            return None;
+        }
+    }
+    if chain.is_empty() {
+        return None;
+    }
+    chain.reverse();
+    let mut delta = LanguageDelta {
+        mode: "identity".to_owned(),
+        from_content_identity: Some(from.to_owned()),
+        to_content_identity: Some(index.content_identity.clone()),
+        from_profile: String::new(),
+        to_profile: index.current_profile.clone(),
+        profiles: Vec::new(),
+        profile_changes: LanguageChangeSet::default(),
+        modules: LanguageChangeSet::default(),
+        exports: LanguageChangeSet::default(),
+        intrinsics: LanguageChangeSet::default(),
+        effects: LanguageChangeSet::default(),
+        capabilities: LanguageChangeSet::default(),
+        canonical_examples: LanguageChangeSet::default(),
+    };
+    for item in chain {
+        if delta.from_profile.is_empty() {
+            delta.from_profile = item
+                .from_profile
+                .clone()
+                .unwrap_or_else(|| index.current_profile.clone());
+        }
+        if let Some(to_profile) = &item.to_profile {
+            delta.to_profile = to_profile.clone();
+        }
+        delta.profiles.extend(item.profiles.added.iter().cloned());
+        merge_profile_changes(&mut delta.profile_changes, &item.profiles);
+        merge_change_set(&mut delta.modules, &item.modules);
+        merge_change_set(&mut delta.exports, &item.exports);
+        merge_change_set(&mut delta.intrinsics, &item.intrinsics);
+        merge_change_set(&mut delta.effects, &item.effects);
+        merge_change_set(&mut delta.capabilities, &item.capabilities);
+        merge_change_set(&mut delta.canonical_examples, &item.canonical_examples);
+    }
+    if delta.from_profile.is_empty() {
+        delta.from_profile = index.current_profile.clone();
+    }
+    delta.profiles.truncate(max_items);
+    for changes in [
+        &mut delta.profile_changes,
+        &mut delta.modules,
+        &mut delta.exports,
+        &mut delta.intrinsics,
+        &mut delta.effects,
+        &mut delta.capabilities,
+        &mut delta.canonical_examples,
+    ] {
+        changes.added.truncate(max_items);
+        changes.changed.truncate(max_items);
+        changes.removed.truncate(max_items);
+    }
+    Some(delta)
+}
+
 pub fn query(
     root: Option<&Path>,
     topic: Option<&str>,
@@ -231,6 +436,41 @@ pub fn query(
             },
             delta: None,
         });
+    }
+    if let Some(from) = known_identity {
+        if let Some(delta) = identity_delta(&path, &index, from, max_items) {
+            let mut counts = BTreeMap::new();
+            counts.insert("profiles".to_owned(), delta.profiles.len());
+            counts.insert("modules".to_owned(), change_count(&delta.modules));
+            counts.insert("exports".to_owned(), change_count(&delta.exports));
+            counts.insert("intrinsics".to_owned(), change_count(&delta.intrinsics));
+            counts.insert("effects".to_owned(), change_count(&delta.effects));
+            counts.insert("capabilities".to_owned(), change_count(&delta.capabilities));
+            counts.insert(
+                "canonical_examples".to_owned(),
+                change_count(&delta.canonical_examples),
+            );
+            return Ok(LanguageCapabilitiesResponse {
+                schema_version: SCHEMA.to_owned(),
+                source_path: path.to_string_lossy().into_owned(),
+                content_identity: index.content_identity,
+                current_profile: index.current_profile,
+                capsule: serde_json::Value::Object(Default::default()),
+                topics: Vec::new(),
+                modules: Vec::new(),
+                examples: Vec::new(),
+                intrinsics: Vec::new(),
+                provenance: Vec::new(),
+                projection: LanguageProjection {
+                    mode: "delta".to_owned(),
+                    layers: vec!["identity".to_owned(), "delta".to_owned()],
+                    counts,
+                    complete: true,
+                    limitations: Vec::new(),
+                },
+                delta: Some(delta),
+            });
+        }
     }
     let topic_filter = topic.map(str::to_ascii_lowercase);
     let symbol_filter = symbol.map(str::to_ascii_lowercase);
@@ -311,6 +551,9 @@ pub fn query(
             .collect::<Vec<_>>()
     });
     let delta = delta_from.map(|from| LanguageDelta {
+        mode: "profile".to_owned(),
+        from_content_identity: None,
+        to_content_identity: None,
         from_profile: from.to_owned(),
         to_profile: index.current_profile.clone(),
         profiles: delta_profiles
@@ -320,6 +563,13 @@ pub fn query(
             .take(max_items)
             .cloned()
             .collect(),
+        profile_changes: LanguageChangeSet::default(),
+        modules: LanguageChangeSet::default(),
+        exports: LanguageChangeSet::default(),
+        intrinsics: LanguageChangeSet::default(),
+        effects: LanguageChangeSet::default(),
+        capabilities: LanguageChangeSet::default(),
+        canonical_examples: LanguageChangeSet::default(),
     });
     let truncated = filtered_topics.len() > max_items
         || filtered_modules.len() > max_items
@@ -385,6 +635,10 @@ pub fn query(
         },
         delta,
     })
+}
+
+fn change_count(changes: &LanguageChangeSet) -> usize {
+    changes.added.len() + changes.changed.len() + changes.removed.len()
 }
 
 fn version_gt(left: &str, right: &str) -> bool {
@@ -478,6 +732,27 @@ mod tests {
             serde_json::to_vec(&index).expect("fixture json"),
         )
         .expect("fixture index");
+        fs::write(
+            root.join("docs/language-capability-deltas.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": DELTA_SCHEMA,
+                "retention": 8,
+                "history_identity": "fixture-history",
+                "deltas": [{
+                    "previous_content_identity": "old-content",
+                    "current_content_identity": "fixture-content",
+                    "profiles": {"added": [{"version": "0.18"}], "changed": [], "removed": []},
+                    "modules": {"added": ["mncs.fixture"], "changed": [], "removed": []},
+                    "exports": {"added": ["mncs.fixture::answer"], "changed": [], "removed": []},
+                    "intrinsics": {"added": ["select"], "changed": [], "removed": []},
+                    "effects": {"added": ["clock_read"], "changed": [], "removed": []},
+                    "capabilities": {"added": ["clock_grant"], "changed": [], "removed": []},
+                    "canonical_examples": {"added": ["mncs.example/identity/1"], "changed": [], "removed": []}
+                }]
+            }))
+            .expect("delta json"),
+        )
+        .expect("delta history");
         root
     }
 
@@ -525,6 +800,23 @@ mod tests {
         assert_eq!(targeted.projection.counts["effects"], 1);
         assert_eq!(unchanged.projection.mode, "unchanged");
         assert!(unchanged.modules.is_empty());
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn identity_delta_is_compact_and_semantic() {
+        let root = fixture_root();
+        let response = query(Some(&root), None, None, None, None, Some("old-content"), 16)
+            .expect("identity delta");
+        assert_eq!(response.projection.mode, "delta");
+        let delta = response.delta.expect("delta payload");
+        assert_eq!(delta.mode, "identity");
+        assert_eq!(delta.from_content_identity.as_deref(), Some("old-content"));
+        assert_eq!(delta.from_profile, "0.18");
+        assert_eq!(delta.to_profile, "0.18");
+        assert_eq!(delta.modules.added, vec!["mncs.fixture"]);
+        assert_eq!(delta.intrinsics.added, vec!["select"]);
+        assert!(response.modules.is_empty());
         fs::remove_dir_all(root).expect("fixture cleanup");
     }
 }
