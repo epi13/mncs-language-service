@@ -90,6 +90,7 @@ async fn lists_expected_read_only_tools() {
     for expected in [
         "workspace_status",
         "language_capabilities",
+        "family_agent_context",
         "document_diagnostics",
         "identity_at_position",
         "debug_source_binding",
@@ -117,6 +118,24 @@ async fn lists_expected_read_only_tools() {
             );
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn family_agent_context_is_bounded_and_identity_bound() {
+    let harness = spawn_server().await;
+    let result = call(
+        &harness.peer,
+        "family_agent_context".to_owned(),
+        serde_json::json!({ "max_items": 4 }),
+    )
+    .await;
+    assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
+    let payload = result.structured_content.expect("structured context");
+    assert_eq!(payload["schema_version"], "mncs.family-agent-context/1");
+    assert!(payload["language"]["content_identity"].is_string());
+    assert!(payload["architecture"]["content_identity"].is_string());
+    assert!(payload["provenance"].as_array().expect("provenance").len() >= 2);
+    assert!(payload["completeness"]["state"].is_string());
 }
 
 #[tokio::test(flavor = "multi_thread")]

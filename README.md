@@ -73,6 +73,10 @@ What works today:
   plus `MNCS_LIBRARY_PATH` standard-library roots), so editing an importing
   module yields real deltas instead of false unresolvable-import diagnostics;
 - a read-only MCP tool surface for agents over the same resident state;
+- `family_agent_context`, the bounded family preflight that composes the
+  repository-local manifest, current language/compiler identities, Commons
+  architecture and pressure projections, and optional non-normative Atlas
+  orientation without creating a second family registry;
 - `language_capabilities`, a bounded query over the authoritative
   `mncs-language/docs/language-capabilities.json` index. It provides a compact
   capsule, topic/symbol expansion, profile deltas, and source provenance so

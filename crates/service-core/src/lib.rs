@@ -18,6 +18,7 @@ mod debug_binding;
 mod document;
 pub mod edits;
 mod error;
+pub mod family_context;
 pub mod format;
 mod indexes;
 pub mod intel;
@@ -43,6 +44,11 @@ pub use debug_binding::{
 pub use document::{DocumentStore, MAX_DISCOVERED_DOCUMENTS, MAX_DOCUMENT_BYTES};
 pub use edits::{TextChange, TextRange};
 pub use error::ServiceError;
+pub use family_context::{
+    ArchitectureContext, AtlasContext, ContextCompleteness, ContextSource,
+    FamilyAgentContextResponse, LanguageContext, PressureSummary, RepositoryContext,
+    FAMILY_CONTEXT_SCHEMA,
+};
 pub use format::{format_text, FormattingResponse, RangeFormattingResponse};
 pub use indexes::{ReferenceEntry, SymbolEntry, SymbolIndex, SymbolKind};
 pub use intel::{

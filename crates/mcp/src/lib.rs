@@ -164,6 +164,33 @@ fn default_language_capability_limit() -> u32 {
     16
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FamilyAgentContextParams {
+    /// Optional stable repository id. When omitted, the local
+    /// `.mncs/project.json` is authoritative for the workspace root.
+    #[serde(default)]
+    pub repository: Option<String>,
+    /// Optional language topic filter such as `effects` or `identity`.
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// Optional language module/symbol filter.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Previously received language capability content identity.
+    #[serde(default)]
+    pub known_language_identity: Option<String>,
+    /// Previously received Commons architecture content identity.
+    #[serde(default)]
+    pub known_architecture_identity: Option<String>,
+    /// Bound each returned projection (default 16, maximum 32).
+    #[serde(default = "default_family_context_limit")]
+    pub max_items: u32,
+}
+
+fn default_family_context_limit() -> u32 {
+    16
+}
+
 /// The resident MNCS semantic service exposed through MCP.
 #[derive(Clone)]
 pub struct MncsSemanticServer {
@@ -262,6 +289,33 @@ impl MncsSemanticServer {
             profile.as_deref(),
             delta_from.as_deref(),
             known_identity.as_deref(),
+            max_items as usize,
+        ) {
+            Ok(response) => Ok(self.answered(serialize(&response))),
+            Err(error) => Ok(self.failed(error.to_string())),
+        }
+    }
+
+    #[tool(
+        description = "Return one bounded MNCS family preflight: repository-local manifest, current language/profile and compiler-inventory identities, identity-based language delta, Commons architecture ownership/shadow projection and relevant unresolved pressures, plus optional non-normative Atlas orientation. The response preserves UNKNOWN/incomplete state and never treats Atlas as semantic authority."
+    )]
+    async fn family_agent_context(
+        &self,
+        Parameters(FamilyAgentContextParams {
+            repository,
+            topic,
+            symbol,
+            known_language_identity,
+            known_architecture_identity,
+            max_items,
+        }): Parameters<FamilyAgentContextParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.service().family_agent_context(
+            repository.as_deref(),
+            topic.as_deref(),
+            symbol.as_deref(),
+            known_language_identity.as_deref(),
+            known_architecture_identity.as_deref(),
             max_items as usize,
         ) {
             Ok(response) => Ok(self.answered(serialize(&response))),

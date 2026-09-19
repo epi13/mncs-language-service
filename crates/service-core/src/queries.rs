@@ -715,6 +715,29 @@ impl LanguageService {
         )
     }
 
+    /// Compose one bounded repository/family preflight.  The individual
+    /// language, Commons, and Atlas facts remain owned by their source
+    /// repositories; this service owns only the query envelope and bounds.
+    pub fn family_agent_context(
+        &self,
+        repository: Option<&str>,
+        topic: Option<&str>,
+        symbol: Option<&str>,
+        known_language_identity: Option<&str>,
+        known_architecture_identity: Option<&str>,
+        max_items: usize,
+    ) -> Result<crate::family_context::FamilyAgentContextResponse, ServiceError> {
+        crate::family_context::query(
+            self.workspace_root().as_deref(),
+            repository,
+            topic,
+            symbol,
+            known_language_identity,
+            known_architecture_identity,
+            max_items,
+        )
+    }
+
     fn document_status_entry(&self, uri: &str) -> DocumentStatusEntry {
         let open = self.store.is_open(uri).unwrap_or(false);
         let buffer_version = self.store.buffer_version(uri).ok().flatten();
