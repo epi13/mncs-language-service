@@ -1,16 +1,16 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-language-service",
-  "revision": 2,
+  "revision": 3,
   "manifest_location": "in-repository",
   "authority": {"note": "Language Service owns resident query/protocol projections and bounded family context; mncs-language owns language semantics and Commons owns family architecture/pressure facts."},
   "organization": {
     "layout": "mncs.repository-layout/1",
     "surfaces": [
-      {"path": "crates/service-core/", "class": "canonical", "authority": "mncs-language-service"},
-      {"path": "crates/lsp/", "class": "host-boundary", "note": "LSP transport adapter."},
-      {"path": "crates/mcp/", "class": "host-boundary", "note": "MCP transport adapter."},
-      {"path": "crates/service-core/src/family_context.rs", "class": "canonical", "note": "Bounded family preflight projection; source facts remain externally owned."}
+      {"path": "crates/service-core/", "class": "canonical", "authority": "mncs-language-service", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
+      {"path": "crates/lsp/", "class": "host-boundary", "note": "LSP transport adapter.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "protocol", "semantic_role": "platform-adapter"}},
+      {"path": "crates/mcp/", "class": "host-boundary", "note": "MCP transport adapter.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "protocol", "semantic_role": "platform-adapter"}},
+      {"path": "crates/service-core/src/family_context.rs", "class": "canonical", "note": "Bounded family preflight composition; source facts remain externally owned.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "protocol", "semantic_role": "canonical-semantic"}}
     ]
   },
   "contracts": {

@@ -1,26 +1,36 @@
-//! Bounded family preflight for agents.
+//! Bounded family preflight composed from owning authority projections.
 //!
-//! This module composes read-only projections from the authorities that own
-//! them.  The language capability index remains owned by `mncs-language`;
-//! Commons owns family architecture, pressure, and shadow facts; Atlas is an
-//! optional non-normative orientation projection.  The service owns only the
-//! bounded response shape and query policy.
+//! Language Service owns the response envelope, protocol adaptation, and
+//! bounds. The Standard validates repository manifests, `mncs-language`
+//! supplies language/compiler facts, and Commons supplies architecture,
+//! pressure lifecycle, filtering, and delta semantics through its bounded
+//! `family agent-context` read surface. This module deliberately does not
+//! read Commons' raw model, delta history, pressure records, or generated
+//! views.
 
-use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::language_knowledge::{self, LanguageDelta, LanguageModule, LanguageTopic};
+use crate::language_knowledge::{
+    self, LanguageChangeSet, LanguageDelta, LanguageModule, LanguageTopic,
+};
 use crate::{ResponseStatus, ServiceError};
 
 pub const FAMILY_CONTEXT_SCHEMA: &str = "mncs.family-agent-context/1";
-const ARCHITECTURE_SCHEMA: &str = "commons.mncs.architecture-model/1";
+const COMMONS_PROJECTION_SCHEMA: &str = "commons.mncs.family-agent-projection/1";
+const MANIFEST_VALIDATION_SCHEMA: &str = "mncs.standard.repository-manifest-validation/1";
 const MAX_CONTEXT_ITEMS: usize = 32;
+const LANGUAGE_AUTHORITY_ITEMS: usize = 256;
+const AUTHORITY_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_AUTHORITY_OUTPUT: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FamilyAgentContextResponse {
@@ -29,8 +39,8 @@ pub struct FamilyAgentContextResponse {
     pub repository: Option<RepositoryContext>,
     pub language: LanguageContext,
     pub architecture: ArchitectureContext,
-    /// Atlas is deliberately labelled as orientation: it never replaces the
-    /// local manifest or Commons facts in this response.
+    /// Optional non-normative orientation. Atlas never contributes to
+    /// `complete`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub atlas: Option<AtlasContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -45,6 +55,9 @@ pub struct RepositoryContext {
     pub revision: Option<u64>,
     pub manifest_path: String,
     pub manifest_identity: String,
+    pub manifest_conformance_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_validation_identity: Option<String>,
     pub authority: Option<Value>,
     pub contracts: Option<Value>,
     pub present: bool,
@@ -57,6 +70,7 @@ pub struct LanguageContext {
     pub content_identity: Option<String>,
     pub compiler_inventory_identity: Option<String>,
     pub mode: String,
+    pub state: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub topics: Vec<LanguageTopic>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -73,6 +87,10 @@ pub struct ArchitectureContext {
     pub source_path: Option<String>,
     pub schema_identity: Option<String>,
     pub content_identity: Option<String>,
+    pub validation_identity: Option<String>,
+    pub validation_state: String,
+    pub freshness: String,
+    pub projection_identity: Option<String>,
     pub mode: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<Value>,
@@ -91,6 +109,7 @@ pub struct AtlasContext {
     pub registry_identity: Option<String>,
     pub registry_revision: Option<String>,
     pub authority: String,
+    pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<Value>,
 }
@@ -113,11 +132,26 @@ pub struct PressureSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextAuthorityState {
+    pub authority: String,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    /// A bounded projection may bind a second owning identity.  Commons
+    /// pressure rows, for example, are only complete when both the generated
+    /// view identity and the validated registry identity are current.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_identity: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextCompleteness {
     pub complete: bool,
     pub state: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limitations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorities: Vec<ContextAuthorityState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +160,19 @@ pub struct ContextSource {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
+    pub state: String,
+}
+
+#[derive(Debug)]
+struct CommonsProjection {
+    architecture: ArchitectureContext,
+    pressures: Vec<PressureSummary>,
+    limitations: Vec<String>,
+    sources: Vec<ContextSource>,
+    architecture_state: String,
+    pressure_state: String,
+    pressure_registry_identity: Option<String>,
+    pressure_view_identity: Option<String>,
 }
 
 pub fn query(
@@ -147,10 +194,8 @@ pub fn query(
         .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
         .or_else(|| env::current_dir().ok());
 
-    let mut limitations = Vec::new();
-    let (local_repository, mut repository_limitations, manifest_source) =
+    let (local_repository, mut limitations, manifest_source, manifest_state) =
         load_repository_manifest(workspace.as_deref());
-    limitations.append(&mut repository_limitations);
     let repository_id = local_repository
         .as_ref()
         .and_then(|item| item.repository.as_deref())
@@ -181,13 +226,42 @@ pub fn query(
         None,
         None,
         known_language_identity,
-        max_items,
+        LANGUAGE_AUTHORITY_ITEMS,
     ) {
         Ok(response) => {
+            let projection_limitations = response.projection.limitations.clone();
+            let mut language_limitations = projection_limitations.clone();
+            let mut topics = response.topics;
+            let mut modules = response.modules;
+            let mut delta = response.delta;
+            let response_truncated = topics.len() > max_items
+                || modules.len() > max_items
+                || delta
+                    .as_ref()
+                    .is_some_and(|value| language_delta_has_more(value, max_items));
+            topics.truncate(max_items);
+            modules.truncate(max_items);
+            if let Some(value) = &mut delta {
+                bound_language_delta(value, max_items);
+            }
+            if response_truncated {
+                language_limitations.push(
+                    "language capability rows are bounded by the family context limit".to_owned(),
+                );
+            }
+            let complete = response.projection.complete
+                && !response_truncated
+                && response.compiler_inventory_identity.is_some();
+            if response.compiler_inventory_identity.is_none() {
+                language_limitations.push("compiler inventory identity is unavailable".to_owned());
+            }
+            let state = if complete { "verified" } else { "partial" };
+            limitations.extend(projection_limitations);
             provenance.push(ContextSource {
                 authority: "mncs-language".to_owned(),
                 path: response.source_path.clone(),
                 identity: Some(response.content_identity.clone()),
+                state: state.to_owned(),
             });
             LanguageContext {
                 source_path: Some(response.source_path),
@@ -195,47 +269,80 @@ pub fn query(
                 content_identity: Some(response.content_identity),
                 compiler_inventory_identity: response.compiler_inventory_identity,
                 mode: response.projection.mode,
-                topics: response.topics,
-                modules: response.modules,
-                delta: response.delta,
-                complete: response.projection.complete,
-                limitations: response.projection.limitations,
+                state: state.to_owned(),
+                topics,
+                modules,
+                delta,
+                complete,
+                limitations: language_limitations,
             }
         }
         Err(error) => {
-            limitations.push(format!(
-                "language capability projection unavailable: {error}"
-            ));
+            let detail = format!("language capability projection unavailable: {error}");
+            limitations.push(detail.clone());
             LanguageContext {
                 source_path: None,
                 current_profile: None,
                 content_identity: None,
                 compiler_inventory_identity: None,
                 mode: "unknown".to_owned(),
+                state: "unavailable".to_owned(),
                 topics: Vec::new(),
                 modules: Vec::new(),
                 delta: None,
                 complete: false,
-                limitations: vec![error.to_string()],
+                limitations: vec![detail],
             }
         }
     };
 
     let commons_root = discover_commons_root(workspace.as_deref());
-    let (architecture, mut architecture_limitations, architecture_sources) = load_architecture(
-        commons_root.as_deref(),
-        repository_id.as_deref(),
-        known_architecture_identity,
-        max_items,
-    );
-    limitations.append(&mut architecture_limitations);
-    provenance.extend(architecture_sources);
-
-    let (pressures, pressure_source) =
-        load_pressures(commons_root.as_deref(), repository_id.as_deref(), max_items);
-    if let Some(source) = pressure_source {
-        provenance.push(source);
-    }
+    let commons = match (commons_root.as_deref(), repository_id.as_deref()) {
+        (Some(root), Some(repository_id)) => {
+            load_commons_projection(root, repository_id, known_architecture_identity, max_items)
+        }
+        (None, _) => Err("Commons checkout was not found".to_owned()),
+        (_, None) => Err("repository identity is unavailable for Commons query".to_owned()),
+    };
+    let (
+        architecture,
+        pressures,
+        architecture_state,
+        pressure_state,
+        pressure_registry_identity,
+        pressure_view_identity,
+    ) = match commons {
+        Ok(projection) => {
+            limitations.extend(
+                projection
+                    .limitations
+                    .iter()
+                    .filter(|item| is_blocking_projection_limitation(item))
+                    .cloned(),
+            );
+            provenance.extend(projection.sources.clone());
+            (
+                projection.architecture,
+                projection.pressures,
+                projection.architecture_state,
+                projection.pressure_state,
+                projection.pressure_registry_identity,
+                projection.pressure_view_identity,
+            )
+        }
+        Err(error) => {
+            let detail = format!("Commons bounded family projection unavailable: {error}");
+            limitations.push(detail.clone());
+            (
+                unknown_architecture(detail.clone()),
+                Vec::new(),
+                "unavailable".to_owned(),
+                "unavailable".to_owned(),
+                None,
+                None,
+            )
+        }
+    };
 
     let (atlas, atlas_source) = load_atlas(workspace.as_deref(), repository_id.as_deref());
     if let Some(source) = atlas_source {
@@ -248,18 +355,53 @@ pub fn query(
                 .to_owned(),
         );
     }
-    let authoritative_complete = local_repository.is_some()
+    let complete = local_repository
+        .as_ref()
+        .is_some_and(|item| item.manifest_conformance_state == "verified")
         && language.complete
         && architecture.complete
+        && manifest_state == "verified"
+        && architecture_state == "current"
+        && pressure_state == "current"
         && limitations.is_empty();
-    let bounded = language.complete && architecture.complete;
-    let state = if authoritative_complete {
+    let bounded = language.state != "unavailable"
+        && architecture_state != "unavailable"
+        && manifest_state != "unavailable";
+    let state = if complete {
         "complete"
     } else if bounded {
         "partial"
     } else {
         "unknown"
     };
+    let authorities = vec![
+        ContextAuthorityState {
+            authority: "machine-native-complexity-standard".to_owned(),
+            state: manifest_state,
+            identity: local_repository
+                .as_ref()
+                .and_then(|item| item.manifest_validation_identity.clone()),
+            registry_identity: None,
+        },
+        ContextAuthorityState {
+            authority: "mncs-language".to_owned(),
+            state: language.state.clone(),
+            identity: language.content_identity.clone(),
+            registry_identity: None,
+        },
+        ContextAuthorityState {
+            authority: "MNCS-Commons.architecture".to_owned(),
+            state: architecture_state,
+            identity: architecture.content_identity.clone(),
+            registry_identity: None,
+        },
+        ContextAuthorityState {
+            authority: "MNCS-Commons.pressures".to_owned(),
+            state: pressure_state,
+            identity: pressure_view_identity,
+            registry_identity: pressure_registry_identity,
+        },
+    ];
 
     Ok(FamilyAgentContextResponse {
         schema_version: FAMILY_CONTEXT_SCHEMA.to_owned(),
@@ -270,9 +412,10 @@ pub fn query(
         atlas,
         pressures,
         completeness: ContextCompleteness {
-            complete: authoritative_complete,
+            complete,
             state: state.to_owned(),
             limitations,
+            authorities,
         },
         provenance,
     })
@@ -284,14 +427,20 @@ fn load_repository_manifest(
     Option<RepositoryContext>,
     Vec<String>,
     Option<ContextSource>,
+    String,
 ) {
     let Some(root) = workspace else {
-        return (None, vec!["workspace root is unavailable".to_owned()], None);
+        return (
+            None,
+            vec!["workspace root is unavailable".to_owned()],
+            None,
+            "unavailable".to_owned(),
+        );
     };
     let path = root.join(".mncs/project.json");
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(_) => return (None, Vec::new(), None),
+        Err(_) => return (None, Vec::new(), None, "unavailable".to_owned()),
     };
     let identity = sha256(&bytes);
     let value: Value = match serde_json::from_slice(&bytes) {
@@ -304,7 +453,9 @@ fn load_repository_manifest(
                     authority: "repository".to_owned(),
                     path: path.to_string_lossy().into_owned(),
                     identity: Some(identity),
+                    state: "invalid".to_owned(),
                 }),
+                "invalid".to_owned(),
             )
         }
     };
@@ -315,24 +466,61 @@ fn load_repository_manifest(
     let revision = value.get("revision").and_then(Value::as_u64);
     let authority = value.get("authority").cloned();
     let contracts = value.get("contracts").cloned();
-    let mut limitations = Vec::new();
-    if value.get("schema_version").and_then(Value::as_str)
-        != Some("mncs-family.repository-manifest/v0alpha1")
-    {
-        limitations.push("local manifest has an unsupported schema_version".to_owned());
-    }
+    let validation = load_manifest_validation(root, &path, &identity, repository.as_deref());
+    let (conformance_state, validation_identity, mut limitations) = match validation {
+        Ok(report)
+            if report.get("valid").and_then(Value::as_bool) == Some(true)
+                && report
+                    .get("validation_identity")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_content_identity) =>
+        {
+            (
+                "verified".to_owned(),
+                report
+                    .get("validation_identity")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                Vec::new(),
+            )
+        }
+        Ok(report) if report.get("valid").and_then(Value::as_bool) == Some(true) => (
+            "invalid".to_owned(),
+            report
+                .get("validation_identity")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            vec!["Standard validation projection omitted a content identity".to_owned()],
+        ),
+        Ok(report) => (
+            "invalid".to_owned(),
+            report
+                .get("validation_identity")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            vec!["Standard repository-manifest validation failed".to_owned()],
+        ),
+        Err(error) => (
+            "unavailable".to_owned(),
+            None,
+            vec![format!(
+                "Standard repository-manifest validation unavailable: {error}"
+            )],
+        ),
+    };
     if repository.is_none() || revision.is_none() || contracts.is_none() {
-        limitations.push(
-            "local manifest is missing repository, revision, or contracts required by the family manifest contract"
-                .to_owned(),
-        );
+        limitations
+            .push("local manifest did not expose repository, revision, and contracts".to_owned());
     }
+    let source_state = conformance_state.clone();
     (
         Some(RepositoryContext {
             repository,
             revision,
             manifest_path: path.to_string_lossy().into_owned(),
             manifest_identity: identity.clone(),
+            manifest_conformance_state: conformance_state.clone(),
+            manifest_validation_identity: validation_identity,
             authority,
             contracts,
             present: true,
@@ -342,8 +530,494 @@ fn load_repository_manifest(
             authority: "repository".to_owned(),
             path: path.to_string_lossy().into_owned(),
             identity: Some(identity),
+            state: source_state,
         }),
+        conformance_state,
     )
+}
+
+fn load_manifest_validation(
+    repository_root: &Path,
+    manifest_path: &Path,
+    manifest_identity: &str,
+    repository: Option<&str>,
+) -> Result<Value, String> {
+    if let Some(path) = env::var_os("MNCS_STANDARD_VALIDATION_PATH") {
+        let value: Value = serde_json::from_slice(
+            &fs::read(path)
+                .map_err(|error| format!("validation projection read failed: {error}"))?,
+        )
+        .map_err(|error| format!("validation projection JSON is invalid: {error}"))?;
+        if value.get("schema_version").and_then(Value::as_str) != Some(MANIFEST_VALIDATION_SCHEMA)
+            || value.get("manifest_identity").and_then(Value::as_str) != Some(manifest_identity)
+        {
+            return Err("validation projection is not bound to this manifest".to_owned());
+        }
+        return Ok(value);
+    }
+    let standard_root = discover_standard_root(repository_root)
+        .ok_or_else(|| "Standard checkout was not found".to_owned())?;
+    let command = env::var_os("MNCS_STANDARD_COMMAND").unwrap_or_else(|| "python3".into());
+    let manifest = manifest_path.to_string_lossy().into_owned();
+    let root = repository_root.to_string_lossy().into_owned();
+    let repository = repository.unwrap_or_default().to_owned();
+    let args = [
+        "scripts/validate-family-manifest.py",
+        "--manifest",
+        manifest.as_str(),
+        "--repository-root",
+        root.as_str(),
+        "--repository",
+        repository.as_str(),
+    ];
+    let value = run_json_command(&command, &args, &standard_root, None, true)?;
+    if value.get("schema_version").and_then(Value::as_str) != Some(MANIFEST_VALIDATION_SCHEMA)
+        || value.get("manifest_identity").and_then(Value::as_str) != Some(manifest_identity)
+    {
+        return Err("Standard validation projection is not bound to this manifest".to_owned());
+    }
+    Ok(value)
+}
+
+fn load_commons_projection(
+    root: &Path,
+    repository: &str,
+    known_architecture_identity: Option<&str>,
+    max_items: usize,
+) -> Result<CommonsProjection, String> {
+    let value = if let Some(path) = env::var_os("MNCS_COMMONS_PROJECTION_PATH") {
+        serde_json::from_slice(
+            &fs::read(path).map_err(|error| format!("Commons projection read failed: {error}"))?,
+        )
+        .map_err(|error| format!("Commons projection JSON is invalid: {error}"))?
+    } else {
+        let command = env::var_os("MNCS_COMMONS_COMMAND").unwrap_or_else(|| "python3".into());
+        let mut args = vec![
+            "-m".to_owned(),
+            "mncs_commons.cli".to_owned(),
+            "family".to_owned(),
+            "agent-context".to_owned(),
+            "--root".to_owned(),
+            root.to_string_lossy().into_owned(),
+            "--repository".to_owned(),
+            repository.to_owned(),
+            "--max-items".to_owned(),
+            max_items.to_string(),
+        ];
+        if let Some(identity) = known_architecture_identity {
+            args.push("--since-architecture".to_owned());
+            args.push(identity.to_owned());
+        }
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let pythonpath = root.join("src");
+        run_json_command(&command, &refs, root, Some(&pythonpath), false)?
+    };
+    parse_commons_projection(value, root, max_items)
+}
+
+fn parse_commons_projection(
+    value: Value,
+    root: &Path,
+    max_items: usize,
+) -> Result<CommonsProjection, String> {
+    if value.get("schema_version").and_then(Value::as_str) != Some(COMMONS_PROJECTION_SCHEMA) {
+        return Err("Commons projection schema is unsupported".to_owned());
+    }
+    let projection_identity = value
+        .get("projection_identity")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let projection_identity_valid = projection_identity
+        .as_deref()
+        .is_some_and(is_content_identity);
+    let freshness = value
+        .get("freshness")
+        .and_then(Value::as_str)
+        .unwrap_or("invalid");
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("invalid");
+    let root_limitations = value
+        .get("limitations")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let architecture_value = value.get("architecture").cloned().unwrap_or(Value::Null);
+    let architecture_query = architecture_value
+        .get("query")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let projection = architecture_query
+        .get("projection")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let mut architecture_limitations = root_limitations.clone();
+    architecture_limitations.extend(
+        projection
+            .get("limitations")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned),
+    );
+    let capabilities = architecture_query
+        .get("scoped_capabilities")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .take(max_items)
+        .collect::<Vec<_>>();
+    let generators = architecture_query
+        .get("generators")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .take(max_items)
+        .collect::<Vec<_>>();
+    if architecture_query
+        .get("scoped_capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.len() > max_items)
+    {
+        architecture_limitations.push("architecture projection truncated at max_items".to_owned());
+    }
+    let architecture_freshness = architecture_value
+        .get("freshness")
+        .and_then(Value::as_str)
+        .unwrap_or(freshness);
+    let architecture_state = if status != "verified"
+        || !projection_identity_valid
+        || architecture_value
+            .get("validation_state")
+            .and_then(Value::as_str)
+            != Some("verified")
+    {
+        "invalid"
+    } else if architecture_freshness == "current" {
+        "current"
+    } else if architecture_freshness == "truncated" {
+        "truncated"
+    } else if architecture_freshness == "stale" {
+        "stale"
+    } else {
+        "unavailable"
+    };
+    let architecture_complete = architecture_state == "current"
+        && architecture_value
+            .get("schema_identity")
+            .and_then(Value::as_str)
+            .is_some()
+        && architecture_value
+            .get("content_identity")
+            .and_then(Value::as_str)
+            .is_some()
+        && architecture_value
+            .get("validation_identity")
+            .and_then(Value::as_str)
+            .is_some()
+        && projection.get("complete").and_then(Value::as_bool) == Some(true)
+        && !architecture_limitations
+            .iter()
+            .any(|item| is_blocking_projection_limitation(item));
+    let architecture = ArchitectureContext {
+        source_path: Some(format!("{}:family-agent-context", root.display())),
+        schema_identity: architecture_value
+            .get("schema_identity")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        content_identity: architecture_value
+            .get("content_identity")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        validation_identity: architecture_value
+            .get("validation_identity")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        validation_state: architecture_value
+            .get("validation_state")
+            .and_then(Value::as_str)
+            .unwrap_or("invalid")
+            .to_owned(),
+        freshness: architecture_freshness.to_owned(),
+        projection_identity: projection_identity.clone(),
+        mode: projection
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned(),
+        capabilities,
+        generators,
+        delta: architecture_query.get("delta").cloned(),
+        complete: architecture_complete,
+        limitations: architecture_limitations,
+    };
+
+    let pressure_value = value.get("pressures").cloned().unwrap_or(Value::Null);
+    let pressure_freshness = pressure_value
+        .get("freshness")
+        .and_then(Value::as_str)
+        .unwrap_or(freshness);
+    let pressure_identities_present = pressure_value
+        .get("registry_identity")
+        .and_then(Value::as_str)
+        .is_some()
+        && pressure_value
+            .get("view_identity")
+            .and_then(Value::as_str)
+            .is_some();
+    let pressure_rows = pressure_value
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let pressure_rows_truncated = pressure_rows.len() > max_items;
+    let pressure_state = if status != "verified"
+        || !projection_identity_valid
+        || pressure_value
+            .get("validation_state")
+            .and_then(Value::as_str)
+            != Some("verified")
+        || !pressure_identities_present
+    {
+        "invalid"
+    } else if pressure_rows_truncated {
+        "truncated"
+    } else if pressure_freshness == "current" {
+        "current"
+    } else if pressure_freshness == "truncated" {
+        "truncated"
+    } else if pressure_freshness == "stale" {
+        "stale"
+    } else if pressure_freshness == "unavailable" {
+        "unavailable"
+    } else {
+        "invalid"
+    };
+    let mut pressures = Vec::new();
+    for item in pressure_rows.into_iter().take(max_items) {
+        if let Some(id) = item.get("id").and_then(Value::as_str) {
+            pressures.push(PressureSummary {
+                id: id.to_owned(),
+                title: item.get("title").and_then(Value::as_str).map(str::to_owned),
+                target: item
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                domain: item
+                    .get("domain")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                severity: item
+                    .get("severity")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                status: item
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                verification_state: item
+                    .get("verificationState")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                unresolved: item.get("unresolved").and_then(Value::as_bool),
+                affected_repositories: item
+                    .get("affectedRepositories")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                required_behavior: item
+                    .get("requiredBehavior")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                source_path: format!("{}:family-agent-context", root.display()),
+            });
+        }
+    }
+    let mut limitations = root_limitations;
+    if pressure_state != "current" {
+        limitations.push("Commons pressure projection is not current and verified".to_owned());
+    }
+    if architecture_state != "current" {
+        limitations.push("Commons architecture projection is not current and verified".to_owned());
+    }
+    Ok(CommonsProjection {
+        architecture,
+        pressures,
+        limitations,
+        sources: vec![
+            ContextSource {
+                authority: "MNCS-Commons.architecture".to_owned(),
+                path: format!("{}:family-agent-context", root.display()),
+                identity: architecture_value
+                    .get("content_identity")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                state: architecture_state.to_owned(),
+            },
+            ContextSource {
+                authority: "MNCS-Commons.pressures".to_owned(),
+                path: format!("{}:family-agent-context", root.display()),
+                identity: pressure_value
+                    .get("view_identity")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                state: pressure_state.to_owned(),
+            },
+        ],
+        architecture_state: architecture_state.to_owned(),
+        pressure_state: pressure_state.to_owned(),
+        pressure_registry_identity: pressure_value
+            .get("registry_identity")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        pressure_view_identity: pressure_value
+            .get("view_identity")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+fn is_blocking_projection_limitation(value: &str) -> bool {
+    [
+        "truncated",
+        "stale",
+        "unavailable",
+        "validation failed",
+        "not current",
+        "invalid",
+    ]
+    .iter()
+    .any(|marker| value.to_ascii_lowercase().contains(marker))
+}
+
+fn is_content_identity(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn language_delta_has_more(value: &LanguageDelta, max_items: usize) -> bool {
+    value.profiles.len() > max_items
+        || change_set_has_more(&value.profile_changes, max_items)
+        || change_set_has_more(&value.modules, max_items)
+        || change_set_has_more(&value.exports, max_items)
+        || change_set_has_more(&value.intrinsics, max_items)
+        || change_set_has_more(&value.effects, max_items)
+        || change_set_has_more(&value.capabilities, max_items)
+        || change_set_has_more(&value.canonical_examples, max_items)
+}
+
+fn change_set_has_more(value: &LanguageChangeSet, max_items: usize) -> bool {
+    value.added.len() > max_items
+        || value.changed.len() > max_items
+        || value.removed.len() > max_items
+}
+
+fn bound_language_delta(value: &mut LanguageDelta, max_items: usize) {
+    value.profiles.truncate(max_items);
+    for changes in [
+        &mut value.profile_changes,
+        &mut value.modules,
+        &mut value.exports,
+        &mut value.intrinsics,
+        &mut value.effects,
+        &mut value.capabilities,
+        &mut value.canonical_examples,
+    ] {
+        changes.added.truncate(max_items);
+        changes.changed.truncate(max_items);
+        changes.removed.truncate(max_items);
+    }
+}
+
+fn run_json_command(
+    command: &std::ffi::OsStr,
+    args: &[&str],
+    current_dir: &Path,
+    pythonpath: Option<&Path>,
+    allow_nonzero_json: bool,
+) -> Result<Value, String> {
+    let mut process = Command::new(command);
+    process
+        .args(args)
+        .current_dir(current_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(path) = pythonpath {
+        let existing = env::var_os("PYTHONPATH").unwrap_or_default();
+        let mut joined = path.as_os_str().to_os_string();
+        if !existing.is_empty() {
+            joined.push(":");
+            joined.push(existing);
+        }
+        process.env("PYTHONPATH", joined);
+    }
+    let mut child = process
+        .spawn()
+        .map_err(|error| format!("authority query could not start: {error}"))?;
+    let deadline = Instant::now() + AUTHORITY_QUERY_TIMEOUT;
+    loop {
+        match child
+            .try_wait()
+            .map_err(|error| format!("authority query wait failed: {error}"))?
+        {
+            Some(status) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|error| format!("authority query output failed: {error}"))?;
+                if output.stdout.len() > MAX_AUTHORITY_OUTPUT {
+                    return Err("authority query output exceeded its bound".to_owned());
+                }
+                if !status.success() && !allow_nonzero_json {
+                    return Err(format!(
+                        "authority query exited unsuccessfully: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ));
+                }
+                return serde_json::from_slice(&output.stdout)
+                    .map_err(|error| format!("authority query returned invalid JSON: {error}"));
+            }
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                return Err("authority query exceeded its time bound".to_owned());
+            }
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+fn discover_standard_root(workspace: &Path) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = env::var_os("MNCS_STANDARD_ROOT") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(workspace.to_path_buf());
+    let mut ancestor = workspace.parent();
+    for _ in 0..5 {
+        let Some(path) = ancestor else { break };
+        candidates.push(path.join("machine-native-complexity-standard"));
+        ancestor = path.parent();
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.join("scripts/validate-family-manifest.py").is_file())
 }
 
 fn discover_commons_root(workspace: Option<&Path>) -> Option<PathBuf> {
@@ -355,375 +1029,38 @@ fn discover_commons_root(workspace: Option<&Path>) -> Option<PathBuf> {
         candidates.push(root.to_path_buf());
         candidates.push(root.join("MNCS-Commons"));
         let mut ancestor = root.parent();
-        for _ in 0..4 {
+        for _ in 0..5 {
             let Some(path) = ancestor else { break };
             candidates.push(path.join("MNCS-Commons"));
             ancestor = path.parent();
         }
     }
-    if let Ok(current) = env::current_dir() {
-        candidates.push(current.join("MNCS-Commons"));
-    }
-    let mut seen = BTreeSet::new();
     candidates.into_iter().find(|candidate| {
-        seen.insert(candidate.clone())
+        candidate
+            .join("family/architecture-model-v1.json")
+            .is_file()
             && candidate
-                .join("family/architecture-model-v1.json")
+                .join("src/mncs_commons/family_projection.py")
                 .is_file()
     })
 }
 
-fn load_architecture(
-    commons_root: Option<&Path>,
-    repository: Option<&str>,
-    known_identity: Option<&str>,
-    max_items: usize,
-) -> (ArchitectureContext, Vec<String>, Vec<ContextSource>) {
-    let Some(root) = commons_root else {
-        return (
-            ArchitectureContext {
-                source_path: None,
-                schema_identity: None,
-                content_identity: None,
-                mode: "unknown".to_owned(),
-                capabilities: Vec::new(),
-                generators: Vec::new(),
-                delta: None,
-                complete: false,
-                limitations: vec!["Commons architecture model was not found".to_owned()],
-            },
-            vec!["Commons architecture projection unavailable".to_owned()],
-            Vec::new(),
-        );
-    };
-    let path = root.join("family/architecture-model-v1.json");
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return (
-                ArchitectureContext {
-                    source_path: Some(path.to_string_lossy().into_owned()),
-                    schema_identity: None,
-                    content_identity: None,
-                    mode: "unknown".to_owned(),
-                    capabilities: Vec::new(),
-                    generators: Vec::new(),
-                    delta: None,
-                    complete: false,
-                    limitations: vec![error.to_string()],
-                },
-                vec!["Commons architecture projection could not be read".to_owned()],
-                Vec::new(),
-            );
-        }
-    };
-    let model: Value = match serde_json::from_slice(&bytes) {
-        Ok(value) => value,
-        Err(error) => {
-            return (
-                ArchitectureContext {
-                    source_path: Some(path.to_string_lossy().into_owned()),
-                    schema_identity: None,
-                    content_identity: None,
-                    mode: "unknown".to_owned(),
-                    capabilities: Vec::new(),
-                    generators: Vec::new(),
-                    delta: None,
-                    complete: false,
-                    limitations: vec![format!("invalid Commons architecture JSON: {error}")],
-                },
-                vec!["Commons architecture projection is invalid".to_owned()],
-                vec![ContextSource {
-                    authority: "MNCS-Commons".to_owned(),
-                    path: path.to_string_lossy().into_owned(),
-                    identity: Some(sha256(&bytes)),
-                }],
-            );
-        }
-    };
-    let schema_identity = model
-        .get("schema_identity")
-        .or_else(|| model.get("schema_version"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let content_identity = model
-        .get("content_identity")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let mut limitations = Vec::new();
-    if schema_identity.as_deref() != Some(ARCHITECTURE_SCHEMA) {
-        limitations.push("Commons architecture schema identity is not supported".to_owned());
+fn unknown_architecture(reason: String) -> ArchitectureContext {
+    ArchitectureContext {
+        source_path: None,
+        schema_identity: None,
+        content_identity: None,
+        validation_identity: None,
+        validation_state: "unavailable".to_owned(),
+        freshness: "unavailable".to_owned(),
+        projection_identity: None,
+        mode: "unknown".to_owned(),
+        capabilities: Vec::new(),
+        generators: Vec::new(),
+        delta: None,
+        complete: false,
+        limitations: vec![reason],
     }
-    if content_identity.is_none() {
-        limitations.push("Commons architecture content identity is missing".to_owned());
-    }
-    let current_capabilities = relevant_capabilities(&model, repository, None, max_items);
-    let all_relevant_count = relevant_capabilities(&model, repository, None, usize::MAX).len();
-    let current_generators = model
-        .get("generators")
-        .and_then(Value::as_array)
-        .map(|items| items.iter().take(max_items).cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let generator_count = model
-        .get("generators")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    if all_relevant_count > max_items || generator_count > max_items {
-        limitations.push("architecture collections are bounded by max_items".to_owned());
-    }
-    let mut mode = "full".to_owned();
-    let mut delta = None;
-    let mut capabilities = current_capabilities;
-    let mut generators = current_generators;
-    if known_identity.is_some() && known_identity == content_identity.as_deref() {
-        mode = "unchanged".to_owned();
-        capabilities.clear();
-        generators.clear();
-    } else if let (Some(known), Some(current)) = (known_identity, content_identity.as_deref()) {
-        if let Some(chain) = architecture_delta_chain(root, &model, known, current) {
-            mode = "delta".to_owned();
-            delta = Some(serde_json::json!({
-                "from": known,
-                "to": current,
-                "mode": "delta",
-                "chain": chain,
-            }));
-        } else {
-            limitations.push(
-                "requested architecture identity is outside the retained delta chain; current bounded projection returned"
-                    .to_owned(),
-            );
-        }
-    }
-    if repository.is_none() {
-        limitations.push(
-            "repository identity is unavailable; architecture capabilities are not scoped"
-                .to_owned(),
-        );
-    }
-    let complete = !limitations.iter().any(|item| {
-        item.contains("not supported")
-            || item.contains("missing")
-            || item.contains("unavailable")
-            || item.contains("invalid")
-            || item.contains("outside")
-            || item.contains("bounded")
-            || item.contains("unavailable")
-    });
-    let mut sources = vec![ContextSource {
-        authority: "MNCS-Commons".to_owned(),
-        path: path.to_string_lossy().into_owned(),
-        identity: content_identity.clone(),
-    }];
-    if let Some(history_path) = delta_history_path(&model, root) {
-        if let Ok(history_bytes) = fs::read(&history_path) {
-            sources.push(ContextSource {
-                authority: "MNCS-Commons".to_owned(),
-                path: history_path.to_string_lossy().into_owned(),
-                identity: Some(sha256(&history_bytes)),
-            });
-        }
-    }
-    (
-        ArchitectureContext {
-            source_path: Some(path.to_string_lossy().into_owned()),
-            schema_identity,
-            content_identity,
-            mode,
-            capabilities,
-            generators,
-            delta,
-            complete,
-            limitations,
-        },
-        Vec::new(),
-        sources,
-    )
-}
-
-fn relevant_capabilities(
-    model: &Value,
-    repository: Option<&str>,
-    filter: Option<&str>,
-    max_items: usize,
-) -> Vec<Value> {
-    let needle = filter.map(str::to_ascii_lowercase);
-    let mut values = model
-        .get("capabilities")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter(|item| {
-                    let owned = repository.is_some_and(|wanted| {
-                        item.get("owner").and_then(Value::as_str) == Some(wanted)
-                            || item
-                                .get("canonical")
-                                .and_then(|value| value.get("repository"))
-                                .and_then(Value::as_str)
-                                == Some(wanted)
-                    });
-                    let text = serde_json::to_string(item)
-                        .unwrap_or_default()
-                        .to_ascii_lowercase();
-                    let filtered = needle
-                        .as_deref()
-                        .map(|wanted| text.contains(wanted))
-                        .unwrap_or(true);
-                    owned && filtered
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    values.sort_by(|left, right| {
-        left.get("id")
-            .and_then(Value::as_str)
-            .cmp(&right.get("id").and_then(Value::as_str))
-    });
-    values.truncate(max_items);
-    values
-}
-
-fn delta_history_path(model: &Value, root: &Path) -> Option<PathBuf> {
-    let relative = model
-        .get("delta_history")
-        .and_then(|value| value.get("path"))
-        .and_then(Value::as_str)
-        .unwrap_or("family/architecture-delta-history-v1.json");
-    let path = root.join(relative);
-    path.is_file().then_some(path)
-}
-
-fn architecture_delta_chain(
-    root: &Path,
-    model: &Value,
-    known: &str,
-    current: &str,
-) -> Option<Vec<Value>> {
-    let path = delta_history_path(model, root)?;
-    let history: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-    let deltas = history.get("deltas")?.as_array()?;
-    let mut chain = Vec::new();
-    let mut cursor = current.to_owned();
-    while cursor != known {
-        let item = deltas.iter().rev().find(|item| {
-            item.get("current_content_identity").and_then(Value::as_str) == Some(cursor.as_str())
-        })?;
-        chain.push(item.clone());
-        cursor = item
-            .get("previous_content_identity")
-            .and_then(Value::as_str)?
-            .to_owned();
-        if chain.len() > deltas.len() {
-            return None;
-        }
-    }
-    chain.reverse();
-    Some(chain)
-}
-
-fn load_pressures(
-    commons_root: Option<&Path>,
-    repository: Option<&str>,
-    max_items: usize,
-) -> (Vec<PressureSummary>, Option<ContextSource>) {
-    let (Some(root), Some(repository)) = (commons_root, repository) else {
-        return (Vec::new(), None);
-    };
-    let view_path = root.join("pressures/views/unresolved-language.json");
-    if let Ok(bytes) = fs::read(&view_path) {
-        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-            let mut rows = value
-                .get("pressures")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter(|item| {
-                            item.get("affectedRepositories")
-                                .and_then(Value::as_array)
-                                .is_some_and(|repos| {
-                                    repos
-                                        .iter()
-                                        .any(|candidate| candidate.as_str() == Some(repository))
-                                })
-                        })
-                        .filter_map(|item| pressure_summary(item, &view_path))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            rows.sort_by(|left, right| left.id.cmp(&right.id));
-            rows.truncate(max_items);
-            return (
-                rows,
-                Some(ContextSource {
-                    authority: "MNCS-Commons".to_owned(),
-                    path: view_path.to_string_lossy().into_owned(),
-                    identity: Some(sha256(&bytes)),
-                }),
-            );
-        }
-    }
-    (Vec::new(), None)
-}
-
-fn pressure_summary(value: &Value, source: &Path) -> Option<PressureSummary> {
-    let id = value.get("id")?.as_str()?.to_owned();
-    let required_behavior = source
-        .parent()
-        .and_then(Path::parent)
-        .map(|pressures| pressures.join("records").join(format!("{id}.json")))
-        .and_then(|path| fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|record| {
-            record
-                .get("requiredBehavior")
-                .or_else(|| record.get("required_behavior"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        });
-    Some(PressureSummary {
-        id,
-        title: value
-            .get("title")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        target: value
-            .get("target")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        domain: value
-            .get("domain")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        severity: value
-            .get("severity")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        status: value
-            .get("status")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        verification_state: value
-            .get("verificationState")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        unresolved: value.get("unresolved").and_then(Value::as_bool),
-        affected_repositories: value
-            .get("affectedRepositories")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        required_behavior,
-        source_path: source.to_string_lossy().into_owned(),
-    })
 }
 
 fn load_atlas(
@@ -738,7 +1075,7 @@ fn load_atlas(
         candidates.push(root.join("registry/compiled.json"));
         candidates.push(root.join("mncs-atlas/registry/compiled.json"));
         let mut ancestor = root.parent();
-        for _ in 0..4 {
+        for _ in 0..5 {
             let Some(path) = ancestor else { break };
             candidates.push(path.join("mncs-atlas/registry/compiled.json"));
             ancestor = path.parent();
@@ -787,11 +1124,9 @@ fn load_atlas(
             .get("registry_hash")
             .and_then(Value::as_str)
             .map(|hash| format!("sha256:{hash}")),
-        registry_revision: value
-            .get("registry_revision")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        authority: "orientation-only; owning repositories and Commons retain authority".to_owned(),
+        registry_revision: value.get("registry_revision").and_then(Value::as_str).map(str::to_owned),
+        authority: "orientation-only; owning repositories, Standard, language, and Commons retain authority".to_owned(),
+        state: "orientation".to_owned(),
         project,
     };
     (
@@ -800,6 +1135,7 @@ fn load_atlas(
             authority: "mncs-atlas (non-normative orientation)".to_owned(),
             path: path.to_string_lossy().into_owned(),
             identity: Some(sha256(&bytes)),
+            state: "orientation".to_owned(),
         }),
     )
 }
@@ -815,7 +1151,8 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temp_root() -> PathBuf {
+    #[test]
+    fn missing_required_authorities_remain_unknown() {
         let root = env::temp_dir().join(format!(
             "mncs-family-context-{}",
             SystemTime::now()
@@ -824,147 +1161,49 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(root.join(".mncs")).unwrap();
-        fs::create_dir_all(root.join("MNCS-Commons/family")).unwrap();
-        fs::create_dir_all(root.join("MNCS-Commons/pressures/views")).unwrap();
-        fs::create_dir_all(root.join("MNCS-Commons/pressures/records")).unwrap();
-        fs::create_dir_all(root.join("mncs-language/docs")).unwrap();
-        root
-    }
-
-    fn write_fixtures(root: &Path) {
-        fs::write(
-            root.join(".mncs/project.json"),
-            r#"{"schema_version":"mncs-family.repository-manifest/v0alpha1","repository":"fixture-repo","revision":1,"contracts":{"provides":[],"consumes":[],"tests":[]}}"#,
-        )
-        .unwrap();
-        fs::write(
-            root.join("mncs-language/docs/language-capabilities.json"),
-            serde_json::json!({
-                "schema_version":"mncs.language-capabilities/1",
-                "generator_identity":"fixture",
-                "language":"MNCS",
-                "current_profile":"0.18",
-                "profile_registry_identity":"fixture-profile",
-                "compiler_inventory_identity":"fixture-inventory",
-                "profiles":[],"library_modules":[],"intrinsics":[],"topics":[],"examples":[],"provenance":[{"path":"fixture","kind":"fixture","source_identity":"fixture"}],"projections":{},"capsule":{},"content_identity":"lang-current"
-            }).to_string(),
-        )
-        .unwrap();
-        fs::write(
-            root.join("mncs-language/docs/language-capability-deltas.json"),
-            serde_json::json!({
-                "schema_version": "mncs.language-capability-deltas/1",
-                "retention": 8,
-                "history_identity": "fixture-history",
-                "deltas": [{
-                    "previous_content_identity": "lang-old",
-                    "current_content_identity": "lang-current",
-                    "from_profile": "0.17",
-                    "to_profile": "0.18",
-                    "modules": {"added": ["fixture.module"]}
-                }]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        fs::write(
-            root.join("MNCS-Commons/family/architecture-model-v1.json"),
-            serde_json::json!({
-                "schema_version":ARCHITECTURE_SCHEMA,
-                "schema_identity":ARCHITECTURE_SCHEMA,
-                "content_identity":"arch-current",
-                "capabilities":[{"id":"fixture.capability","owner":"fixture-repo","canonical":{"repository":"fixture-repo","path":"native/main.mncs"},"active_alternates":[]}],
-                "generators":[]
-            }).to_string(),
-        ).unwrap();
-        fs::write(
-            root.join("MNCS-Commons/family/architecture-delta-history-v1.json"),
-            serde_json::json!({
-                "schema_version": "commons.mncs.architecture-delta-history/1",
-                "retention": 8,
-                "deltas": [{
-                    "previous_content_identity": "arch-old",
-                    "current_content_identity": "arch-current",
-                    "changed_capabilities": ["fixture.capability"],
-                    "added_contracts": [],
-                    "removed_contracts": [],
-                    "ownership_changes": [],
-                    "shadow_state_transitions": []
-                }]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        fs::write(
-            root.join("MNCS-Commons/pressures/views/unresolved-language.json"),
-            serde_json::json!({"pressures":[{"id":"FIXTURE-P","title":"fixture","target":"language","affectedRepositories":["fixture-repo"],"unresolved":true}]}).to_string(),
-        ).unwrap();
-        fs::write(
-            root.join("MNCS-Commons/pressures/records/FIXTURE-P.json"),
-            serde_json::json!({"id":"FIXTURE-P","requiredBehavior":"fixture behavior"}).to_string(),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn current_identity_is_bounded_and_complete() {
-        let root = temp_root();
-        write_fixtures(&root);
-        let response = query(
-            Some(&root),
-            None,
-            None,
-            None,
-            Some("lang-current"),
-            Some("arch-current"),
-            8,
-        )
-        .unwrap();
-        assert_eq!(response.schema_version, FAMILY_CONTEXT_SCHEMA);
-        assert_eq!(response.language.mode, "unchanged");
-        assert_eq!(response.architecture.mode, "unchanged");
-        assert!(response.completeness.complete);
-        assert_eq!(response.pressures.len(), 1);
-        assert_eq!(response.pressures[0].id, "FIXTURE-P");
-        assert_eq!(
-            response.pressures[0].required_behavior.as_deref(),
-            Some("fixture behavior")
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn retained_identities_return_bounded_deltas() {
-        let root = temp_root();
-        write_fixtures(&root);
-        let response = query(
-            Some(&root),
-            None,
-            None,
-            None,
-            Some("lang-old"),
-            Some("arch-old"),
-            8,
-        )
-        .unwrap();
-        assert_eq!(response.language.mode, "delta");
-        assert_eq!(response.architecture.mode, "delta");
-        assert!(response.language.delta.is_some());
-        assert!(response.architecture.delta.is_some());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn missing_authorities_remain_unknown() {
-        let root = temp_root();
-        fs::write(
-            root.join(".mncs/project.json"),
-            r#"{"schema_version":"mncs-family.repository-manifest/v0alpha1","repository":"fixture-repo","revision":1,"contracts":{"provides":[],"consumes":[],"tests":[]}}"#,
-        )
-        .unwrap();
+        fs::write(root.join(".mncs/project.json"), r#"{"schema_version":"mncs-family.repository-manifest/v0alpha1","repository":"fixture-repo","revision":1,"contracts":{"provides":[],"consumes":[],"tests":[]}}"#).unwrap();
         let response = query(Some(&root), None, None, None, None, None, 8).unwrap();
         assert_eq!(response.completeness.state, "unknown");
         assert!(!response.completeness.complete);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_projection_is_not_complete() {
+        let value = serde_json::json!({"schema_version": COMMONS_PROJECTION_SCHEMA, "status": "invalid", "freshness": "invalid", "architecture": {"query": {"projection": {"mode": "unknown"}}}, "pressures": {"validation_state": "invalid"}});
+        let parsed = parse_commons_projection(value, Path::new("/commons"), 8).unwrap();
+        assert!(!parsed.architecture.complete);
+        assert_eq!(parsed.architecture_state, "invalid");
+        assert_eq!(parsed.pressure_state, "invalid");
+    }
+
+    #[test]
+    fn stale_pressure_view_is_not_current_or_complete() {
+        let value = serde_json::json!({
+            "schema_version": COMMONS_PROJECTION_SCHEMA,
+            "projection_identity": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "status": "verified",
+            "freshness": "stale",
+            "architecture": {
+                "schema_identity": "commons.mncs.architecture-model/1",
+                "content_identity": "sha256:architecture",
+                "validation_identity": "sha256:validation",
+                "validation_state": "verified",
+                "freshness": "current",
+                "query": {"projection": {"complete": true, "mode": "targeted"}}
+            },
+            "pressures": {
+                "registry_identity": "sha256:registry",
+                "view_identity": "sha256:view",
+                "validation_state": "verified",
+                "freshness": "stale",
+                "rows": []
+            }
+        });
+        let parsed = parse_commons_projection(value, Path::new("/commons"), 8).unwrap();
+        assert!(parsed.architecture.complete);
+        assert_eq!(parsed.architecture_state, "current");
+        assert_eq!(parsed.pressure_state, "stale");
+        assert!(!parsed.limitations.is_empty());
     }
 }

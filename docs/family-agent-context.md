@@ -7,14 +7,16 @@ language, Commons, or Atlas semantics.
 
 The response schema is `mncs.family-agent-context/1` and carries:
 
-- the repository-owned `.mncs/project.json` declaration and its byte identity;
+- the repository-owned `.mncs/project.json` declaration, byte identity, and
+  Standard-owned conformance/validation identity;
 - the current `mncs-language` profile, capability content identity, compiler
   inventory identity, filtered capability facts, and an optional identity
   delta;
-- the Commons architecture schema/content identity, relevant ownership,
-  canonical paths, active shadows, generators, and an optional retained
-  architecture delta;
-- bounded unresolved language pressures from the Commons projection;
+- the Commons-validated architecture schema/content/validation identities,
+  relevant ownership, canonical paths, active shadows, generators, and an
+  optional retained architecture delta;
+- bounded unresolved language pressures from the Commons projection, bound to
+  both the pressure registry identity and a freshly checked generated view;
 - an optional Atlas project summary explicitly labelled non-normative
   orientation; and
 - per-source provenance plus `complete`, `partial`, or `unknown` completeness.
@@ -24,7 +26,8 @@ The source boundaries are intentional:
 | Fact | Authority | Role in this query |
 | --- | --- | --- |
 | Language profile, exports, effects, compiler inventory | `mncs-language` | authoritative source projection |
-| Family ownership, canonical paths, shadows, generators, pressures | `MNCS-Commons` | authoritative coordination projection |
+| Family ownership, canonical paths, shadows, generators | `MNCS-Commons` | authoritative architecture projection and delta owner |
+| Pressure lifecycle and bounded relevant-pressure rows | `MNCS-Commons` | authoritative registry/view projection and lifecycle owner |
 | Repository identity, contracts, test obligations | repository-local manifest | repository-owned declaration |
 | Human orientation and related-project summary | `mncs-atlas` | optional, non-normative projection |
 | Bounded composition and identity/delta envelope | Language Service | query interface only |
@@ -33,15 +36,23 @@ The source boundaries are intentional:
 protocol shape for incremental entry:
 
 ```text
-same identity       -> unchanged envelope
-retained identity   -> bounded delta plus current relevant facts
-unknown/old identity-> bounded full projection with an explicit limitation
+same identity        -> unchanged envelope
+retained identity    -> bounded delta plus current relevant facts
+unknown/old identity -> bounded full projection with an explicit limitation
 ```
 
-An absent manifest, unavailable authority, stale identity, or truncated
-collection never becomes a successful claim. The response preserves
-`UNKNOWN` through `completeness.state` and lists the reason in
-`completeness.limitations`.
+Language Service does not discover or interpret Commons' raw architecture
+model, delta history, pressure records, or generated views. It invokes
+Commons' bounded `family agent-context` projection and only composes its
+versioned response envelope. Likewise, manifest validity comes from the
+Standard validator rather than a second schema implementation.
+
+`complete` requires a verified local manifest, a current language/compiler
+projection, a current and validated Commons architecture projection, and a
+current pressure projection whose registry and generated view identities are
+present. An absent manifest, unavailable authority, stale identity, invalid
+source, or truncated collection preserves `UNKNOWN`/`partial`; Atlas absence
+does not reduce authoritative completeness because Atlas is orientation-only.
 
 The query is intentionally not a repository dump. Use semantic queries such as
 `context_packet`, `describe_subject`, and `semantic_dependencies` for a source
