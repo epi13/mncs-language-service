@@ -1,12 +1,29 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-language-service",
-  "revision": 1,
+  "revision": 2,
   "manifest_location": "in-repository",
-  "authority": {"note": "Language Service owns protocol adapters and resident semantic queries; mncs-language owns semantics."},
+  "authority": {"note": "Language Service owns resident query/protocol projections and bounded family context; mncs-language owns language semantics and Commons owns family architecture/pressure facts."},
+  "organization": {
+    "layout": "mncs.repository-layout/1",
+    "surfaces": [
+      {"path": "crates/service-core/", "class": "canonical", "authority": "mncs-language-service"},
+      {"path": "crates/lsp/", "class": "host-boundary", "note": "LSP transport adapter."},
+      {"path": "crates/mcp/", "class": "host-boundary", "note": "MCP transport adapter."},
+      {"path": "crates/service-core/src/family_context.rs", "class": "canonical", "note": "Bounded family preflight projection; source facts remain externally owned."}
+    ]
+  },
   "contracts": {
-    "provides": [{"contract": "language-tooling", "version": "1", "kind": "lsp-mcp-service", "stability": "experimental", "fingerprint_sources": ["crates/service-core/", "crates/lsp/", "crates/mcp/"]}],
-    "consumes": [{"contract": "mncs-language.semantic-identity", "envelope": {"op": "any"}, "required": true, "evidence_refs": ["README.md"]}],
+    "provides": [
+      {"contract": "language-tooling", "version": "1", "kind": "lsp-mcp-service", "stability": "experimental", "fingerprint_sources": ["crates/service-core/", "crates/lsp/", "crates/mcp/"]},
+      {"contract": "family-agent-context", "version": "1", "kind": "bounded-authoritative-projection", "stability": "experimental", "fingerprint_sources": ["crates/service-core/src/family_context.rs", "docs/family-agent-context.md"]}
+    ],
+    "consumes": [
+      {"contract": "mncs-language.semantic-identity", "envelope": {"op": "any"}, "required": true, "evidence_refs": ["README.md"]},
+      {"contract": "mncs-language.capability-index", "envelope": {"op": "any"}, "required": true},
+      {"contract": "mncs-commons.family-architecture", "envelope": {"op": "any"}, "required": true},
+      {"contract": "mncs-commons.pressure-registry", "envelope": {"op": "any"}, "required": false}
+    ],
     "tests": [{"test": "language-service-tests", "covers": ["language-tooling"], "obligation": "self", "command": {"argv": ["cargo", "test", "--workspace"]}}]
   }
 }

@@ -44,6 +44,7 @@ pub struct LanguageSymbol {
 pub struct LanguageEffect {
     pub capability: String,
     pub effect: String,
+    #[serde(default)]
     pub authorized_by: String,
 }
 
@@ -73,6 +74,12 @@ pub struct LanguageCapabilityIndex {
     pub language: String,
     pub current_profile: String,
     pub profile_registry_identity: String,
+    /// Identity of the compiler-owned declaration/language inventory that
+    /// produced this projection.  The capability index content identity is
+    /// still the envelope identity; this field lets consumers bind the
+    /// language facts to the exact compiler inventory as well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiler_inventory_identity: Option<String>,
     #[serde(default)]
     pub profiles: Vec<serde_json::Value>,
     #[serde(default)]
@@ -187,6 +194,8 @@ pub struct LanguageCapabilitiesResponse {
     pub source_path: String,
     pub content_identity: String,
     pub current_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiler_inventory_identity: Option<String>,
     pub capsule: serde_json::Value,
     pub topics: Vec<LanguageTopic>,
     pub modules: Vec<LanguageModule>,
@@ -208,14 +217,21 @@ pub fn discover(root: Option<&Path>) -> Result<(PathBuf, LanguageCapabilityIndex
     }
     if let Some(root) = root {
         candidates.push(root.join("docs/language-capabilities.json"));
-        if let Some(parent) = root.parent() {
-            candidates.push(parent.join("mncs-language/docs/language-capabilities.json"));
+        candidates.push(root.join("mncs-language/docs/language-capabilities.json"));
+        let mut ancestor = root.parent();
+        for _ in 0..4 {
+            let Some(path) = ancestor else { break };
+            candidates.push(path.join("mncs-language/docs/language-capabilities.json"));
+            ancestor = path.parent();
         }
     }
     if let Ok(current) = env::current_dir() {
         candidates.push(current.join("docs/language-capabilities.json"));
-        if let Some(parent) = current.parent() {
-            candidates.push(parent.join("mncs-language/docs/language-capabilities.json"));
+        let mut ancestor = current.parent();
+        for _ in 0..4 {
+            let Some(path) = ancestor else { break };
+            candidates.push(path.join("mncs-language/docs/language-capabilities.json"));
+            ancestor = path.parent();
         }
     }
     let mut seen = BTreeSet::new();
@@ -421,6 +437,7 @@ pub fn query(
             source_path: path.to_string_lossy().into_owned(),
             content_identity: index.content_identity,
             current_profile: index.current_profile,
+            compiler_inventory_identity: index.compiler_inventory_identity,
             capsule: serde_json::Value::Object(Default::default()),
             topics: Vec::new(),
             modules: Vec::new(),
@@ -455,6 +472,7 @@ pub fn query(
                 source_path: path.to_string_lossy().into_owned(),
                 content_identity: index.content_identity,
                 current_profile: index.current_profile,
+                compiler_inventory_identity: index.compiler_inventory_identity,
                 capsule: serde_json::Value::Object(Default::default()),
                 topics: Vec::new(),
                 modules: Vec::new(),
@@ -606,6 +624,7 @@ pub fn query(
         source_path: path.to_string_lossy().into_owned(),
         content_identity: index.content_identity,
         current_profile: index.current_profile,
+        compiler_inventory_identity: index.compiler_inventory_identity,
         capsule: index.capsule,
         topics,
         modules,
@@ -672,6 +691,7 @@ mod tests {
             language: "MNCS".to_owned(),
             current_profile: "0.18".to_owned(),
             profile_registry_identity: "fixture-profile".to_owned(),
+            compiler_inventory_identity: Some("fixture-compiler-inventory".to_owned()),
             profiles: vec![
                 serde_json::json!({"version": "0.18"}),
                 serde_json::json!({"version": "0.19"}),
