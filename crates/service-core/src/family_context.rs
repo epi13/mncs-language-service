@@ -249,9 +249,12 @@ pub fn query(
                     "language capability rows are bounded by the family context limit".to_owned(),
                 );
             }
-            let complete = response.projection.complete
-                && !response_truncated
-                && response.compiler_inventory_identity.is_some();
+            // `response_truncated` describes Language Service's packet bound,
+            // not a stale or unverified language authority.  The source
+            // identity remains current and the authority projection itself
+            // is complete at its bounded query limit.
+            let complete =
+                response.projection.complete && response.compiler_inventory_identity.is_some();
             if response.compiler_inventory_identity.is_none() {
                 language_limitations.push("compiler inventory identity is unavailable".to_owned());
             }
