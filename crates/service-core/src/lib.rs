@@ -46,7 +46,8 @@ pub use edits::{TextChange, TextRange};
 pub use error::ServiceError;
 pub use family_context::{
     ArchitectureContext, AtlasContext, ContextCompleteness, ContextSource,
-    FamilyAgentContextResponse, LanguageContext, PressureSummary, RepositoryContext,
+    FamilyAgentContextResponse, LanguageContext, NegativeKnowledge, PressureSummary,
+    RepositoryContext, VerificationContext, VerificationObligationSummary,
     FAMILY_CONTEXT_SCHEMA,
 };
 pub use format::{format_text, FormattingResponse, RangeFormattingResponse};

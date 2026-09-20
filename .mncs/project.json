@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-language-service",
-  "revision": 3,
+  "revision": 4,
   "manifest_location": "in-repository",
   "authority": {"note": "Language Service owns resident query/protocol projections and bounded family context; mncs-language owns language semantics and Commons owns family architecture/pressure facts."},
   "organization": {
@@ -13,10 +13,14 @@
       {"path": "crates/service-core/src/family_context.rs", "class": "canonical", "note": "Bounded family preflight composition; source facts remain externally owned.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "protocol", "semantic_role": "canonical-semantic"}}
     ]
   },
+  "verification": {
+    "schema_version": "mncs-family.verification-obligation-inventory/v1",
+    "obligation_inventory": ".mncs/verification-obligations.json"
+  },
   "contracts": {
     "provides": [
       {"contract": "language-tooling", "version": "1", "kind": "lsp-mcp-service", "stability": "experimental", "fingerprint_sources": ["crates/service-core/", "crates/lsp/", "crates/mcp/"]},
-      {"contract": "family-agent-context", "version": "1", "kind": "bounded-authoritative-projection", "stability": "experimental", "fingerprint_sources": ["crates/service-core/src/family_context.rs", "docs/family-agent-context.md"]}
+      {"contract": "family-agent-context", "version": "2", "kind": "bounded-authoritative-projection", "stability": "experimental", "fingerprint_sources": ["crates/service-core/src/family_context.rs", "docs/family-agent-context.md"]}
     ],
     "consumes": [
       {"contract": "mncs-language.semantic-identity", "envelope": {"op": "any"}, "required": true, "evidence_refs": ["README.md"]},

@@ -1,0 +1,47 @@
+{
+  "schema_version": "mncs-family.verification-obligation-inventory/v1",
+  "repository": "mncs-language-service",
+  "revision": 1,
+  "obligations": [
+    {
+      "identity": "mncs-language-service.family-agent-context.boundary",
+      "title": "Agent context composes bounded authoritative identities without repository archaeology",
+      "guarantee_domain": "integration",
+      "evidence_role": "canonical_regression",
+      "lifecycle": "permanent",
+      "scope": "family",
+      "subjects": ["mncs.family-agent-context/2"],
+      "invalidation_dependencies": ["crates/service-core/src/family_context.rs", "docs/family-agent-context.md"],
+      "executor": {
+        "provider": "mncs-language-service",
+        "kind": "native_first_class_test",
+        "entrypoint": "cargo test -p mncs-service-core family_context"
+      },
+      "evidence_identity": {
+        "subject_fields": ["repository_identity", "language_identity", "architecture_identity"],
+        "definition_fields": ["context_schema_version"],
+        "execution_fields": ["response_identity"]
+      }
+    },
+    {
+      "identity": "mncs-language-service.negative-knowledge.boundary",
+      "title": "Known migration-only and non-ordinary paths are explicit and bounded",
+      "guarantee_domain": "integration",
+      "evidence_role": "conformance",
+      "lifecycle": "permanent",
+      "scope": "consumer",
+      "subjects": ["negative_knowledge", "verification-obligation-inventory"],
+      "invalidation_dependencies": ["crates/service-core/src/family_context.rs"],
+      "executor": {
+        "provider": "mncs-language-service",
+        "kind": "compile_experiment",
+        "entrypoint": "cargo test -p mncs-service-core family_context"
+      },
+      "evidence_identity": {
+        "subject_fields": ["source_identity"],
+        "definition_fields": ["lifecycle_identity"],
+        "execution_fields": ["response_identity"]
+      }
+    }
+  ]
+}
