@@ -131,10 +131,14 @@ async fn family_agent_context_is_bounded_and_identity_bound() {
     .await;
     assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
     let payload = result.structured_content.expect("structured context");
-    assert_eq!(payload["schema_version"], "mncs.family-agent-context/1");
+    assert_eq!(payload["schema_version"], "mncs.family-agent-context/2");
+    assert!(payload["verification"]["state"].is_string());
+    assert!(payload["negative_knowledge"].is_array());
     assert!(payload["language"]["content_identity"].is_string());
-    assert!(payload["architecture"]["content_identity"].is_string());
-    assert!(payload["provenance"].as_array().expect("provenance").len() >= 2);
+    let architecture = payload["architecture"].as_object().expect("architecture");
+    assert!(architecture.contains_key("content_identity"));
+    assert!(architecture["validation_state"].is_string());
+    assert!(payload["provenance"].is_array());
     assert!(payload["completeness"]["state"].is_string());
 }
 

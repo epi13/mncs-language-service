@@ -24,9 +24,10 @@ use crate::language_knowledge::{
 };
 use crate::{ResponseStatus, ServiceError};
 
-pub const FAMILY_CONTEXT_SCHEMA: &str = "mncs.family-agent-context/1";
+pub const FAMILY_CONTEXT_SCHEMA: &str = "mncs.family-agent-context/2";
 const COMMONS_PROJECTION_SCHEMA: &str = "commons.mncs.family-agent-projection/1";
 const MANIFEST_VALIDATION_SCHEMA: &str = "mncs.standard.repository-manifest-validation/1";
+const OBLIGATION_INVENTORY_SCHEMA: &str = "mncs-family.verification-obligation-inventory/v1";
 const MAX_CONTEXT_ITEMS: usize = 32;
 const LANGUAGE_AUTHORITY_ITEMS: usize = 256;
 const AUTHORITY_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -39,12 +40,18 @@ pub struct FamilyAgentContextResponse {
     pub repository: Option<RepositoryContext>,
     pub language: LanguageContext,
     pub architecture: ArchitectureContext,
+    /// Repository-owned verification obligations and bounded negative
+    /// knowledge.  The service composes this view; it does not decide which
+    /// obligations exist or promote evidence.
+    pub verification: VerificationContext,
     /// Optional non-normative orientation. Atlas never contributes to
     /// `complete`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub atlas: Option<AtlasContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pressures: Vec<PressureSummary>,
+    #[serde(default)]
+    pub negative_knowledge: Vec<NegativeKnowledge>,
     pub completeness: ContextCompleteness,
     pub provenance: Vec<ContextSource>,
 }
@@ -59,8 +66,51 @@ pub struct RepositoryContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_validation_identity: Option<String>,
     pub authority: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization: Option<Value>,
     pub contracts: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Value>,
     pub present: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationContext {
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inventory_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inventory_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub obligations: Vec<VerificationObligationSummary>,
+    pub complete: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationObligationSummary {
+    pub identity: String,
+    pub title: String,
+    pub guarantee_domain: String,
+    pub evidence_role: String,
+    pub lifecycle: String,
+    pub scope: String,
+    pub executor_provider: String,
+    pub executor_kind: String,
+    pub ordinary_verification: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NegativeKnowledge {
+    pub identity: String,
+    pub disposition: String,
+    pub source: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +246,11 @@ pub fn query(
 
     let (local_repository, mut limitations, manifest_source, manifest_state) =
         load_repository_manifest(workspace.as_deref());
+    let (verification, mut negative_knowledge, verification_source) =
+        load_verification_context(workspace.as_deref(), local_repository.as_ref(), max_items);
+    if verification.state == "invalid" || verification.state == "unavailable" {
+        limitations.extend(verification.limitations.clone());
+    }
     let repository_id = local_repository
         .as_ref()
         .and_then(|item| item.repository.as_deref())
@@ -216,6 +271,9 @@ pub fn query(
 
     let mut provenance = Vec::new();
     if let Some(source) = manifest_source {
+        provenance.push(source);
+    }
+    if let Some(source) = verification_source {
         provenance.push(source);
     }
 
@@ -358,6 +416,9 @@ pub fn query(
                 .to_owned(),
         );
     }
+    negative_knowledge.extend(negative_knowledge_from_manifest(local_repository.as_ref(), max_items));
+    negative_knowledge.sort_by(|left, right| left.identity.cmp(&right.identity));
+    negative_knowledge.dedup_by(|left, right| left.identity == right.identity);
     let complete = local_repository
         .as_ref()
         .is_some_and(|item| item.manifest_conformance_state == "verified")
@@ -404,6 +465,12 @@ pub fn query(
             identity: pressure_view_identity,
             registry_identity: pressure_registry_identity,
         },
+        ContextAuthorityState {
+            authority: "repository.verification-obligations".to_owned(),
+            state: verification.state.clone(),
+            identity: verification.inventory_identity.clone(),
+            registry_identity: None,
+        },
     ];
 
     Ok(FamilyAgentContextResponse {
@@ -412,8 +479,10 @@ pub fn query(
         repository: local_repository,
         language,
         architecture,
+        verification,
         atlas,
         pressures,
+        negative_knowledge,
         completeness: ContextCompleteness {
             complete,
             state: state.to_owned(),
@@ -468,7 +537,9 @@ fn load_repository_manifest(
         .map(str::to_owned);
     let revision = value.get("revision").and_then(Value::as_u64);
     let authority = value.get("authority").cloned();
+    let organization = value.get("organization").cloned();
     let contracts = value.get("contracts").cloned();
+    let verification = value.get("verification").cloned();
     let validation = load_manifest_validation(root, &path, &identity, repository.as_deref());
     let (conformance_state, validation_identity, mut limitations) = match validation {
         Ok(report)
@@ -525,7 +596,9 @@ fn load_repository_manifest(
             manifest_conformance_state: conformance_state.clone(),
             manifest_validation_identity: validation_identity,
             authority,
+            organization,
             contracts,
+            verification,
             present: true,
         }),
         limitations,
@@ -537,6 +610,319 @@ fn load_repository_manifest(
         }),
         conformance_state,
     )
+}
+
+fn load_verification_context(
+    workspace: Option<&Path>,
+    repository: Option<&RepositoryContext>,
+    max_items: usize,
+) -> (VerificationContext, Vec<NegativeKnowledge>, Option<ContextSource>) {
+    let unavailable = |state: &str, limitation: String| {
+        (
+            VerificationContext {
+                state: state.to_owned(),
+                inventory_path: None,
+                inventory_identity: None,
+                repository: repository.and_then(|item| item.repository.clone()),
+                revision: None,
+                obligations: Vec::new(),
+                complete: false,
+                limitations: vec![limitation],
+            },
+            Vec::new(),
+            None,
+        )
+    };
+    let Some(root) = workspace else {
+        return unavailable("unavailable", "workspace root is unavailable".to_owned());
+    };
+    let Some(repository) = repository else {
+        return unavailable(
+            "unavailable",
+            "repository manifest is unavailable; verification obligation ownership is UNKNOWN"
+                .to_owned(),
+        );
+    };
+    let Some(declaration) = repository.verification.as_ref() else {
+        return (
+            VerificationContext {
+                state: "not_declared".to_owned(),
+                inventory_path: None,
+                inventory_identity: None,
+                repository: repository.repository.clone(),
+                revision: None,
+                obligations: Vec::new(),
+                complete: false,
+                limitations: vec![
+                    "repository does not declare a verification obligation inventory".to_owned(),
+                ],
+            },
+            Vec::new(),
+            None,
+        );
+    };
+    if declaration.get("schema_version").and_then(Value::as_str)
+        != Some(OBLIGATION_INVENTORY_SCHEMA)
+    {
+        return unavailable(
+            "invalid",
+            format!(
+                "verification declaration must use {OBLIGATION_INVENTORY_SCHEMA}"
+            ),
+        );
+    }
+    let Some(relative) = declaration
+        .get("obligation_inventory")
+        .and_then(Value::as_str)
+    else {
+        return unavailable(
+            "invalid",
+            "verification declaration does not name obligation_inventory".to_owned(),
+        );
+    };
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute() || relative_path.components().any(|component| {
+        matches!(component, std::path::Component::ParentDir)
+    }) {
+        return unavailable(
+            "invalid",
+            "verification obligation inventory path is not a safe repository-relative path"
+                .to_owned(),
+        );
+    }
+    let path = root.join(relative_path);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return unavailable(
+                "unavailable",
+                format!("verification obligation inventory cannot be read: {error}"),
+            )
+        }
+    };
+    let identity = sha256(&bytes);
+    let value: Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                VerificationContext {
+                    state: "invalid".to_owned(),
+                    inventory_path: Some(path.to_string_lossy().into_owned()),
+                    inventory_identity: Some(identity.clone()),
+                    repository: repository.repository.clone(),
+                    revision: None,
+                    obligations: Vec::new(),
+                    complete: false,
+                    limitations: vec![format!(
+                        "verification obligation inventory is invalid JSON: {error}"
+                    )],
+                },
+                Vec::new(),
+                Some(ContextSource {
+                    authority: "repository.verification-obligations".to_owned(),
+                    path: path.to_string_lossy().into_owned(),
+                    identity: Some(identity),
+                    state: "invalid".to_owned(),
+                }),
+            )
+        }
+    };
+    if value.get("schema_version").and_then(Value::as_str) != Some(OBLIGATION_INVENTORY_SCHEMA) {
+        return (
+            VerificationContext {
+                state: "invalid".to_owned(),
+                inventory_path: Some(path.to_string_lossy().into_owned()),
+                inventory_identity: Some(identity.clone()),
+                repository: repository.repository.clone(),
+                revision: None,
+                obligations: Vec::new(),
+                complete: false,
+                limitations: vec![format!(
+                    "verification obligation inventory must be {OBLIGATION_INVENTORY_SCHEMA}"
+                )],
+            },
+            Vec::new(),
+            Some(ContextSource {
+                authority: "repository.verification-obligations".to_owned(),
+                path: path.to_string_lossy().into_owned(),
+                identity: Some(identity),
+                state: "invalid".to_owned(),
+            }),
+        );
+    }
+    let inventory_repository = value.get("repository").and_then(Value::as_str);
+    let revision = value.get("revision").and_then(Value::as_u64);
+    let raw_obligations = value.get("obligations").and_then(Value::as_array);
+    if inventory_repository != repository.repository.as_deref()
+        || revision.is_none()
+        || raw_obligations.is_none()
+    {
+        return (
+            VerificationContext {
+                state: "invalid".to_owned(),
+                inventory_path: Some(path.to_string_lossy().into_owned()),
+                inventory_identity: Some(identity.clone()),
+                repository: repository.repository.clone(),
+                revision,
+                obligations: Vec::new(),
+                complete: false,
+                limitations: vec![
+                    "verification obligation inventory is not bound to the local repository"
+                        .to_owned(),
+                ],
+            },
+            Vec::new(),
+            Some(ContextSource {
+                authority: "repository.verification-obligations".to_owned(),
+                path: path.to_string_lossy().into_owned(),
+                identity: Some(identity),
+                state: "invalid".to_owned(),
+            }),
+        );
+    }
+    let raw_obligations = raw_obligations.expect("checked above");
+    let truncated = raw_obligations.len() > max_items;
+    let mut obligations = Vec::new();
+    let mut negative = Vec::new();
+    for item in raw_obligations.iter().take(max_items) {
+        let Some(identity_value) = item.get("identity").and_then(Value::as_str) else {
+            return unavailable(
+                "invalid",
+                "verification obligation inventory contains an obligation without identity"
+                    .to_owned(),
+            );
+        };
+        let lifecycle = item
+            .get("lifecycle")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let title = item
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or(identity_value);
+        let domain = item
+            .get("guarantee_domain")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let role = item
+            .get("evidence_role")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let scope = item
+            .get("scope")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let executor = item.get("executor").and_then(Value::as_object);
+        let provider = executor
+            .and_then(|value| value.get("provider"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let kind = executor
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let ordinary = matches!(lifecycle, "permanent" | "transitional");
+        obligations.push(VerificationObligationSummary {
+            identity: identity_value.to_owned(),
+            title: title.to_owned(),
+            guarantee_domain: domain.to_owned(),
+            evidence_role: role.to_owned(),
+            lifecycle: lifecycle.to_owned(),
+            scope: scope.to_owned(),
+            executor_provider: provider.to_owned(),
+            executor_kind: kind.to_owned(),
+            ordinary_verification: ordinary,
+        });
+        if !ordinary {
+            let disposition = match lifecycle {
+                "reference_only" => "historical_reference",
+                "scheduled" => "scheduled_only",
+                "retired" => "retired",
+                _ => "not_ordinary_verification",
+            };
+            negative.push(NegativeKnowledge {
+                identity: identity_value.to_owned(),
+                disposition: disposition.to_owned(),
+                source: path.to_string_lossy().into_owned(),
+                reason: format!(
+                    "obligation lifecycle {lifecycle} is not part of ordinary verification"
+                ),
+            });
+        }
+    }
+    let mut limitations = Vec::new();
+    if truncated {
+        limitations.push("verification obligation rows are bounded by the family context limit".to_owned());
+    }
+    let state = if truncated { "truncated" } else { "current" };
+    (
+        VerificationContext {
+            state: state.to_owned(),
+            inventory_path: Some(path.to_string_lossy().into_owned()),
+            inventory_identity: Some(identity.clone()),
+            repository: repository.repository.clone(),
+            revision,
+            obligations,
+            complete: !truncated,
+            limitations,
+        },
+        negative,
+        Some(ContextSource {
+            authority: "repository.verification-obligations".to_owned(),
+            path: path.to_string_lossy().into_owned(),
+            identity: Some(identity),
+            state: state.to_owned(),
+        }),
+    )
+}
+
+fn negative_knowledge_from_manifest(
+    repository: Option<&RepositoryContext>,
+    max_items: usize,
+) -> Vec<NegativeKnowledge> {
+    let Some(organization) = repository.and_then(|item| item.organization.as_ref()) else {
+        return Vec::new();
+    };
+    let Some(surfaces) = organization.get("surfaces").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    surfaces
+        .iter()
+        .filter_map(|surface| {
+            let path = surface.get("path").and_then(Value::as_str)?;
+            let class = surface.get("class").and_then(Value::as_str).unwrap_or("");
+            let classification = surface.get("classification").and_then(Value::as_object);
+            let lifecycle = classification
+                .and_then(|value| value.get("lifecycle"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let is_migration = class == "migration-shadow" || lifecycle == "temporary";
+            let is_retired = class == "retired" || lifecycle == "retired" || lifecycle == "historical";
+            if !is_migration && !is_retired {
+                return None;
+            }
+            let (disposition, reason) = if is_retired {
+                (
+                    "retired",
+                    "repository surface is historical or retired and is not a canonical implementation path",
+                )
+            } else {
+                (
+                    "migration_only",
+                    "repository surface is temporary migration machinery and is not canonical authority",
+                )
+            };
+            Some(NegativeKnowledge {
+                identity: format!("repository-surface:{path}"),
+                disposition: disposition.to_owned(),
+                source: repository
+                    .map(|item| item.manifest_path.clone())
+                    .unwrap_or_else(|| "manifest".to_owned()),
+                reason: reason.to_owned(),
+            })
+        })
+        .take(max_items)
+        .collect()
 }
 
 fn load_manifest_validation(
