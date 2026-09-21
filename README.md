@@ -8,8 +8,8 @@ The service maintains **resident workspace state**: it tracks documents, runs th
 
 ## Status
 
-**Phases 1–4.7: working service with second-wave editor intelligence and two
-experimental MNCS-native query kernels (implemented / exercised).**
+**Resident workspace/event infrastructure and second-wave editor intelligence
+are implemented and exercised.**
 
 ```text
 MNCS source
@@ -23,6 +23,22 @@ shared semantic query core        (mncs-service-core)
    ├── LSP  → mncs-lsp            editor diagnostics/navigation/hover/tokens/completion
    └── MCP  → mncs-mcp            agent semantic inspection (read-only)
 ```
+
+For shared local development, start one resident host and point every adapter
+at its Unix socket:
+
+```bash
+MNLS_WORKSPACE_ROOT=/path/to/workspace \
+MNLS_SERVICE_SOCKET=/path/to/workspace/.mncs/mnls-language-service.sock \
+cargo run -p mncs-service-core --bin mnls-language-service-host
+```
+
+Set the same `MNLS_SERVICE_SOCKET` for `mncs-lsp`, `mncs-mcp`, and machine
+clients. They then share one workspace generation counter, exact source
+identities, semantic snapshots, and bounded `mncs.workspace-change/1` event
+cursor. The LSP and MCP implementations remain thin protocol adapters over
+the `LanguageServiceClient` boundary; an in-process service is retained for
+tests and compatibility when no socket is configured.
 
 What works today:
 
@@ -125,6 +141,12 @@ See [`ROADMAP.md`](ROADMAP.md) for the authoritative status vocabulary.
 ```
 
 LSP and MCP are adapters over one shared resident core. Neither protocol defines the internal ontology; both resolve the same subjects to the same identities and snapshots.
+
+Workspace edits from LSP buffers and filesystem refreshes converge into the
+same monotonic generation model. Event consumers receive compact diagnostic,
+obligation, subject, impact, and limitation deltas rather than routine source
+or compiler-output dumps. Event history is bounded and cursor-based; when
+history ages out, consumers receive an explicit reset/UNKNOWN condition.
 
 ## Ownership boundary
 

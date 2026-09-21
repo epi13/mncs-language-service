@@ -10,16 +10,17 @@
 //! the document state produced by the previous change.
 
 use crate::coords::PositionMap;
+use serde::{Deserialize, Serialize};
 
 /// One applied content change: `range == None` is a full-document replacement.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextChange {
     pub range: Option<TextRange>,
     pub text: String,
 }
 
 /// An LSP-style line/UTF-16 range (end-exclusive, as in the protocol).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextRange {
     pub start_line: u32,
     pub start_character: u32,

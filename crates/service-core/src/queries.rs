@@ -101,6 +101,8 @@ pub enum OccurrenceRole {
 pub struct WorkspaceStatusResponse {
     pub workspace_root: Option<String>,
     pub generation: u64,
+    #[serde(default)]
+    pub event_cursor: u64,
     pub documents: Vec<DocumentStatusEntry>,
 }
 
@@ -481,6 +483,7 @@ struct AnalysisSlot {
 /// analyzer duplication exists anywhere else in this repository.
 pub struct LanguageService {
     pub(crate) store: DocumentStore,
+    pub(crate) events: Arc<crate::events::EventHub>,
     analyses: RwLock<BTreeMap<String, AnalysisSlot>>,
     /// Serializes concurrent analysis of the same document without holding
     /// global locks during expensive frontend work.
@@ -499,6 +502,7 @@ impl LanguageService {
     pub fn new(root: Option<std::path::PathBuf>) -> Self {
         Self {
             store: DocumentStore::new(root),
+            events: Arc::new(crate::events::EventHub::default()),
             analyses: RwLock::new(BTreeMap::new()),
             analyze_locks: Mutex::new(BTreeMap::new()),
             native_kernel: RwLock::new(None),
@@ -514,13 +518,100 @@ impl LanguageService {
         self.store.workspace_root()
     }
 
+    pub fn events(&self) -> Arc<crate::events::EventHub> {
+        Arc::clone(&self.events)
+    }
+
+    pub fn poll_events(
+        &self,
+        after_cursor: u64,
+        max_events: usize,
+    ) -> crate::events::WorkspaceEventCursor {
+        self.events.poll(after_cursor, max_events)
+    }
+
+    pub fn refresh_workspace(&self) -> Result<Vec<u64>, ServiceError> {
+        let new_documents = self.store.discover_new_documents()?;
+        let mut published = Vec::new();
+        for uri in new_documents {
+            if let Some(generation) = self.store.load_new_disk(&uri)? {
+                if let Some(cursor) =
+                    self.observe_change(&uri, generation.saturating_sub(1), generation, None)?
+                {
+                    published.push(cursor);
+                }
+            }
+        }
+        let before_by_uri: BTreeMap<String, Arc<DocumentAnalysis>> = self
+            .store
+            .document_uris()
+            .into_iter()
+            .filter_map(|uri| {
+                let snapshot = self.cached_any_snapshot(&uri)?;
+                let current = self.content_fingerprint(&uri).ok()?;
+                (current == snapshot.source_identity).then_some((uri, snapshot))
+            })
+            .collect();
+        let changed = self.store.refresh_disk()?;
+        for (uri, generation) in changed {
+            if let Some(cursor) = self.observe_change(
+                &uri,
+                generation.saturating_sub(1),
+                generation,
+                before_by_uri.get(&uri).cloned(),
+            )? {
+                published.push(cursor);
+            }
+        }
+        Ok(published)
+    }
+
+    fn observe_change(
+        &self,
+        uri: &str,
+        replaced_generation: u64,
+        expected_generation: u64,
+        before: Option<Arc<DocumentAnalysis>>,
+    ) -> Result<Option<u64>, ServiceError> {
+        let after = self.snapshot(uri)?;
+        // ReferenceCompiler is synchronous and cannot be interrupted.  The
+        // generation check is therefore the authoritative stale-work guard:
+        // an analysis that finished after a newer edit is never published as
+        // a current event or evidence.
+        if self.store.generation() != expected_generation || after.generation != expected_generation
+        {
+            return Ok(None);
+        }
+        let event = crate::events::project_change(
+            uri,
+            replaced_generation,
+            expected_generation,
+            before.as_deref(),
+            &after,
+        );
+        let cursor = self.events.push(event);
+        self.evict_stale_analyses();
+        Ok(Some(cursor))
+    }
+
+    fn begin_change(&self, uri: &str) -> (u64, Option<Arc<DocumentAnalysis>>) {
+        let replaced_generation = self.store.generation();
+        let before = self.cached_any_snapshot(uri).filter(|snapshot| {
+            self.content_fingerprint(uri).ok().as_deref() == Some(snapshot.source_identity.as_str())
+        });
+        (replaced_generation, before)
+    }
+
     /// Open/change lifecycle entry points (thin delegation).
     pub fn did_open(&self, uri: &str, version: i32, text: String) -> Result<u64, ServiceError> {
-        self.store.did_open(uri, version, text)
+        let (replaced_generation, before) = self.begin_change(uri);
+        let generation = self.store.did_open(uri, version, text)?;
+        let _ = self.observe_change(uri, replaced_generation, generation, before)?;
+        Ok(generation)
     }
 
     pub fn did_change(&self, uri: &str, version: i32, text: String) -> Result<u64, ServiceError> {
-        self.store.did_change(uri, version, text)
+        self.did_open(uri, version, text)
     }
 
     pub fn did_change_incremental(
@@ -529,15 +620,29 @@ impl LanguageService {
         version: i32,
         changes: Vec<crate::edits::TextChange>,
     ) -> Result<u64, ServiceError> {
-        self.store.did_change_incremental(uri, version, changes)
+        let (replaced_generation, before) = self.begin_change(uri);
+        let generation = self.store.did_change_incremental(uri, version, changes)?;
+        let _ = self.observe_change(uri, replaced_generation, generation, before)?;
+        Ok(generation)
     }
 
     pub fn did_save(&self, uri: &str, text: Option<String>) -> Result<u64, ServiceError> {
-        self.store.did_save(uri, text)
+        let (replaced_generation, before) = self.begin_change(uri);
+        let generation = self.store.did_save(uri, text)?;
+        let _ = self.observe_change(uri, replaced_generation, generation, before)?;
+        Ok(generation)
     }
 
     pub fn did_close(&self, uri: &str) -> Result<Option<String>, ServiceError> {
-        self.store.did_close(uri)
+        let (replaced_generation, before) = self.begin_change(uri);
+        let content = self.store.did_close(uri)?;
+        if content.is_some() {
+            let generation = self.store.generation();
+            let _ = self.observe_change(uri, replaced_generation, generation, before)?;
+        } else {
+            self.evict_stale_analyses();
+        }
+        Ok(content)
     }
 
     pub fn discover_workspace(&self) -> Result<Vec<String>, ServiceError> {
@@ -560,6 +665,13 @@ impl LanguageService {
     pub fn content_fingerprint(&self, uri: &str) -> Result<String, ServiceError> {
         let text = self.store.content(uri)?;
         Ok(self.store.envelope(uri, &text).identity)
+    }
+
+    /// Exact resident content for adapters that need to materialize a
+    /// protocol edit.  The service remains the sole owner of the source
+    /// state; clients receive a bounded projection rather than the store.
+    pub fn content(&self, uri: &str) -> Result<String, ServiceError> {
+        Ok((*self.store.content(uri)?).clone())
     }
 
     /// Get (or produce) the analysis snapshot for the document's *current*
@@ -679,17 +791,18 @@ impl LanguageService {
     // Queries
     // -----------------------------------------------------------------
 
-    pub fn workspace_status(&self) -> WorkspaceStatusResponse {
+    pub fn workspace_status(&self) -> Result<WorkspaceStatusResponse, ServiceError> {
         let mut documents = Vec::new();
         for uri in self.store.document_uris() {
             documents.push(self.document_status_entry(&uri));
         }
         documents.sort_by(|left, right| left.uri.cmp(&right.uri));
-        WorkspaceStatusResponse {
+        Ok(WorkspaceStatusResponse {
             workspace_root: self.store.workspace_root_path(),
             generation: self.store.generation(),
+            event_cursor: self.events.current_cursor(),
             documents,
-        }
+        })
     }
 
     /// Query the single language capability projection generated by

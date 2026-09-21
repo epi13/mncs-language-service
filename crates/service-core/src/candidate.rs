@@ -24,7 +24,7 @@ use crate::queries::{snapshot_info, LanguageService, ResponseStatus, SnapshotInf
 use crate::ServiceError;
 
 /// One obligation-level observation used in candidate deltas.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CandidateObligation {
     pub identity: String,
     pub subject: String,
@@ -33,14 +33,14 @@ pub struct CandidateObligation {
 }
 
 /// Semantic identity delta between baseline and candidate programs.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SemanticDelta {
     pub added: Vec<String>,
     pub removed: Vec<String>,
     pub changed: Vec<ChangedIdentity>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChangedIdentity {
     pub identity: String,
     pub fingerprint_before: String,
@@ -48,7 +48,7 @@ pub struct ChangedIdentity {
 }
 
 /// Obligation status delta between baseline and candidate.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ObligationDelta {
     pub added: Vec<CandidateObligation>,
     pub removed: Vec<String>,
@@ -58,7 +58,7 @@ pub struct ObligationDelta {
     pub counts_candidate: StatusCounts,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ObligationStatusChange {
     pub identity: String,
     pub before: String,
@@ -66,7 +66,7 @@ pub struct ObligationStatusChange {
 }
 
 /// Diagnostics delta between baseline and candidate frontends.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiagnosticsDelta {
     pub baseline_count: usize,
     pub candidate_count: usize,
@@ -74,7 +74,7 @@ pub struct DiagnosticsDelta {
     pub codes_removed: Vec<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StaleEvidenceItem {
     pub evidence: String,
     pub dependency: String,
@@ -82,7 +82,7 @@ pub struct StaleEvidenceItem {
 }
 
 /// Full identity-bound candidate analysis response.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CandidateAnalysisResponse {
     pub status: ResponseStatus,
     pub uri: String,
