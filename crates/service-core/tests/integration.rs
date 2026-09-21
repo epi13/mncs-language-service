@@ -2,7 +2,11 @@
 //! snapshots, invalidation, navigation, diagnostics, obligations, tokens,
 //! completion, and failure behavior against representative MNCS fixtures.
 
-use mncs_service_core::{DebugCapabilityStatus, LanguageService, ResponseStatus, SymbolKind};
+use mncs_service_core::{
+    serve_unix, DebugCapabilityStatus, LanguageService, LanguageServiceClient,
+    RemoteLanguageService, ResponseStatus, SymbolKind,
+};
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -33,7 +37,7 @@ const CONTRACTS: &str = "valid-contracts.mncs";
 fn workspace_status_reports_documents_and_readiness() {
     let svc = service();
     svc.discover_workspace().expect("discovery");
-    let status = svc.workspace_status();
+    let status = svc.workspace_status().expect("workspace status");
     assert!(status
         .documents
         .iter()
@@ -44,6 +48,136 @@ fn workspace_status_reports_documents_and_readiness() {
         .find(|document| document.uri.ends_with(CONTRACTS))
         .expect("fixture present");
     assert!(!entry.open);
+}
+
+#[test]
+fn filesystem_refresh_projects_complete_impact_from_resident_before_snapshot() {
+    let root = std::env::temp_dir().join(format!(
+        "mncs-language-service-refresh-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("temporary workspace");
+    let path = root.join("valid-contracts.mncs");
+    fs::copy(fixtures_dir().join(CONTRACTS), &path).expect("fixture copy");
+    let uri = format!("file://{}", path.display());
+    let service = LanguageService::new(Some(root.clone()));
+    service.discover_workspace().expect("discovery");
+    service
+        .document_diagnostics(&uri)
+        .expect("baseline analysis");
+
+    let original = fs::read_to_string(&path).expect("read fixture copy");
+    fs::write(&path, original.replace("return next;", "return next + 1;"))
+        .expect("edit fixture copy");
+    service.refresh_workspace().expect("filesystem refresh");
+
+    let event = service
+        .poll_events(0, 8)
+        .events
+        .into_iter()
+        .last()
+        .expect("filesystem change event");
+    assert!(
+        event.impact_complete,
+        "resident before snapshot must enable impact"
+    );
+    assert!(event.impact.is_some());
+    assert!(!event.semantic_subjects.is_empty());
+    fs::remove_dir_all(&root).expect("cleanup");
+}
+
+#[test]
+fn resident_socket_clients_share_generations_and_event_cursor() {
+    let service = Arc::new(LanguageService::default());
+    let socket = std::env::temp_dir().join(format!(
+        "mncs-language-service-test-{}-{}.sock",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let server_service = Arc::clone(&service);
+    let server_socket = socket.clone();
+    std::thread::spawn(move || {
+        serve_unix(server_socket, server_service).expect("resident socket host");
+    });
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(socket.exists(), "resident socket did not start");
+
+    let remote = RemoteLanguageService::connect_path(&socket);
+    let uri = "untitled:shared-resident-state";
+    let first_generation = remote
+        .did_open(
+            uri,
+            1,
+            "mncs 0.17;\nmodule examples.shared;\ntest sample() -> (result: i64) { return 1; }\n"
+                .to_owned(),
+        )
+        .expect("remote open");
+    let second_generation = remote
+        .did_change_incremental(
+            uri,
+            2,
+            vec![mncs_service_core::TextChange {
+                range: None,
+                text: "mncs 0.17;\nmodule examples.shared;\ntest sample() -> (result: i64) { return 2; }\n"
+                    .to_owned(),
+            }],
+        )
+        .expect("remote change");
+    assert!(second_generation > first_generation);
+
+    let local_status = service.workspace_status().expect("local status");
+    let remote_status = remote.workspace_status().expect("remote status");
+    assert_eq!(local_status.generation, remote_status.generation);
+    assert_eq!(local_status.event_cursor, remote_status.event_cursor);
+    assert_eq!(remote_status.generation, second_generation);
+
+    let remote_events = remote.poll_events(0, 16);
+    let local_events = service.poll_events(0, 16);
+    assert_eq!(remote_events.current_cursor, local_events.current_cursor);
+    assert_eq!(remote_events.events.len(), 2);
+    assert_eq!(
+        remote_events
+            .events
+            .iter()
+            .map(|event| event.cursor)
+            .collect::<Vec<_>>(),
+        local_events
+            .events
+            .iter()
+            .map(|event| event.cursor)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        remote_events.events[1].replaced_generation,
+        first_generation
+    );
+    assert_eq!(
+        remote_events.events[1].current_generation,
+        second_generation
+    );
+    assert_eq!(
+        remote.content(uri).expect("remote content"),
+        service.content(uri).expect("local content")
+    );
+    assert_eq!(
+        remote_events.events[1].current.identity,
+        service
+            .snapshot(uri)
+            .expect("shared snapshot")
+            .source_identity
+    );
 }
 
 #[test]

@@ -13,11 +13,13 @@
 mod actions;
 mod analysis;
 mod candidate;
+mod client;
 mod coords;
 mod debug_binding;
 mod document;
 pub mod edits;
 mod error;
+mod events;
 pub mod family_context;
 pub mod format;
 mod indexes;
@@ -36,6 +38,7 @@ pub use candidate::{
     CandidateAnalysisResponse, CandidateObligation, ChangedIdentity, DiagnosticsDelta,
     ObligationDelta, ObligationStatusChange, SemanticDelta, StaleEvidenceItem,
 };
+pub use client::{serve_unix, LanguageServiceClient, RemoteLanguageService, RpcRequest};
 pub use coords::{PositionInfo, PositionMap, RangeInfo};
 pub use debug_binding::{
     DebugBindingResolution, DebugCapabilityState, DebugCapabilityStatus, DebugSourceBinding,
@@ -44,11 +47,15 @@ pub use debug_binding::{
 pub use document::{DocumentStore, MAX_DISCOVERED_DOCUMENTS, MAX_DOCUMENT_BYTES};
 pub use edits::{TextChange, TextRange};
 pub use error::ServiceError;
+pub use events::{
+    DiagnosticDelta, EventHub, SemanticSubjectChange, SourceIdentity, WorkspaceChangeEvent,
+    WorkspaceEventCursor, WorkspaceObligationDelta, WORKSPACE_CHANGE_SCHEMA_VERSION,
+    WORKSPACE_EVENT_CURSOR_SCHEMA_VERSION,
+};
 pub use family_context::{
     ArchitectureContext, AtlasContext, ContextCompleteness, ContextSource,
     FamilyAgentContextResponse, LanguageContext, NegativeKnowledge, PressureSummary,
-    RepositoryContext, VerificationContext, VerificationObligationSummary,
-    FAMILY_CONTEXT_SCHEMA,
+    RepositoryContext, VerificationContext, VerificationObligationSummary, FAMILY_CONTEXT_SCHEMA,
 };
 pub use format::{format_text, FormattingResponse, RangeFormattingResponse};
 pub use indexes::{ReferenceEntry, SymbolEntry, SymbolIndex, SymbolKind};
@@ -64,14 +71,15 @@ pub use language_knowledge::{
 pub use native_filter::{symbol_kind_tag, NativeFilterSummary, FILTER_PADDING_TAG};
 pub use native_query::NativeStatusSummary;
 pub use queries::{
-    CompletionCandidate, CompletionClass, ContextExcerpt, ContextPacketResponse,
-    DefinitionResponse, DescribeResponse, DiagnosticItem, DiagnosticRelated, DiagnosticsResponse,
-    DocumentStatusEntry, DocumentSymbolNode, DocumentSymbolsResponse, EffectInfo, FoldRange,
-    FoldingRangesResponse, GraphEdgeTarget, GraphResponse, HighlightsResponse, HoverResponse,
-    LanguageService, MemberInfo, NativeKindCountResponse, NativeObligationsResponse,
-    ObligationInfo, ObligationsResponse, Occurrence, OccurrenceRole, PositionQueryResponse,
-    ReferenceHit, ReferencesResponse, ResponseStatus, SemanticTokensResponse, SnapshotInfo,
-    StatusCounts, SubjectDescription, SymbolSummary, TokenAnnotation, TokenClass,
-    WorkspaceStatusResponse, WorkspaceSymbolHit, WorkspaceSymbolsResponse,
+    CompletionCandidate, CompletionClass, CompletionResponse, ContextExcerpt,
+    ContextPacketResponse, DefinitionResponse, DescribeResponse, DiagnosticItem, DiagnosticRelated,
+    DiagnosticsResponse, DocumentStatusEntry, DocumentSymbolNode, DocumentSymbolsResponse,
+    EffectInfo, FoldRange, FoldingRangesResponse, GraphEdgeTarget, GraphResponse,
+    HighlightsResponse, HoverResponse, LanguageService, MemberInfo, NativeKindCountResponse,
+    NativeObligationsResponse, ObligationInfo, ObligationsForUri, ObligationsResponse, Occurrence,
+    OccurrenceRole, PositionQueryResponse, ReferenceHit, ReferencesResponse, ResponseStatus,
+    SemanticTokensResponse, SnapshotInfo, StatusCounts, SubjectDescription, SymbolSummary,
+    TokenAnnotation, TokenClass, WorkspaceStatusResponse, WorkspaceSymbolHit,
+    WorkspaceSymbolsResponse,
 };
 pub use rename::{FileEdit, RenameResponse, SingleEdit};

@@ -60,7 +60,7 @@ pub struct Generations(AtomicU64);
 
 impl Generations {
     pub fn next(&self) -> u64 {
-        self.0.fetch_add(1, Ordering::Relaxed)
+        self.0.fetch_add(1, Ordering::Relaxed).saturating_add(1)
     }
 
     pub fn current(&self) -> u64 {
@@ -108,7 +108,7 @@ impl DocumentStore {
     ///
     /// Already-known documents are left untouched: discovery never clobbers
     /// editor state or previously read disk text.
-    pub fn discover_workspace(&self) -> Result<Vec<String>, ServiceError> {
+    fn discover_workspace_impl(&self, only_new: bool) -> Result<Vec<String>, ServiceError> {
         let _guard = self
             .discovery_lock
             .lock()
@@ -147,7 +147,10 @@ impl DocumentStore {
                     stack.push(path);
                 } else if name.ends_with(".mncs") && discovered.len() < MAX_DISCOVERED_DOCUMENTS {
                     let uri = path_to_uri(&path);
-                    if self.ensure_document(&uri, Some(path)).is_ok() {
+                    let created = self
+                        .ensure_document(&uri, Some(path))
+                        .is_ok_and(|created| created);
+                    if created || !only_new {
                         discovered.push(uri);
                     }
                 }
@@ -155,6 +158,125 @@ impl DocumentStore {
         }
         discovered.sort();
         Ok(discovered)
+    }
+
+    pub fn discover_workspace(&self) -> Result<Vec<String>, ServiceError> {
+        self.discover_workspace_impl(false)
+    }
+
+    /// Discover files added after the resident baseline.  The service uses
+    /// this narrow projection to turn a new filesystem document into one
+    /// generation-bound change event without manufacturing startup events.
+    pub fn discover_new_documents(&self) -> Result<Vec<String>, ServiceError> {
+        self.discover_workspace_impl(true)
+    }
+
+    /// Load a newly discovered on-disk document and assign its first
+    /// workspace generation. Existing buffers and disk baselines are left
+    /// untouched.
+    pub fn load_new_disk(&self, uri: &str) -> Result<Option<u64>, ServiceError> {
+        let _guard = self
+            .discovery_lock
+            .lock()
+            .map_err(|_| ServiceError::InvalidRequest {
+                reason: "workspace refresh is already running".to_owned(),
+            })?;
+        let (path, open, has_disk) = self
+            .read_documents()?
+            .get(uri)
+            .map(|document| {
+                (
+                    document.path.clone().or_else(|| path_from_uri(uri)),
+                    document.open(),
+                    document.disk.is_some(),
+                )
+            })
+            .ok_or_else(|| ServiceError::DocumentNotFound {
+                uri: uri.to_owned(),
+            })?;
+        if open || has_disk {
+            return Ok(None);
+        }
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        let text = fs::read_to_string(&path).map_err(|error| ServiceError::InvalidRequest {
+            reason: format!(
+                "could not read discovered document {}: {error}",
+                path.display()
+            ),
+        })?;
+        if text.len() > MAX_DOCUMENT_BYTES {
+            return Ok(None);
+        }
+        let mut documents = self.write_documents()?;
+        let Some(document) = documents.get_mut(uri) else {
+            return Ok(None);
+        };
+        if document.open() || document.disk.is_some() {
+            return Ok(None);
+        }
+        document.disk = Some(Arc::new(text));
+        Ok(Some(self.generations.next()))
+    }
+
+    /// Reconcile known on-disk documents with their current filesystem bytes.
+    /// Open buffers remain authoritative and are never clobbered.  The
+    /// returned `(uri, generation)` pairs are consumed by the resident
+    /// service so filesystem edits and LSP edits enter one event stream.
+    pub fn refresh_disk(&self) -> Result<Vec<(String, u64)>, ServiceError> {
+        let _guard = self
+            .discovery_lock
+            .lock()
+            .map_err(|_| ServiceError::InvalidRequest {
+                reason: "workspace refresh is already running".to_owned(),
+            })?;
+        let candidates: Vec<(String, PathBuf, bool, Option<Arc<String>>)> = self
+            .read_documents()?
+            .iter()
+            .filter_map(|(uri, document)| {
+                let path = document.path.clone().or_else(|| path_from_uri(uri))?;
+                Some((uri.clone(), path, document.open(), document.disk.clone()))
+            })
+            .collect();
+        let mut changed = Vec::new();
+        for (uri, path, open, previous) in candidates {
+            if open {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            if text.len() > MAX_DOCUMENT_BYTES {
+                continue;
+            }
+            // Discovery establishes the filesystem baseline.  A first refresh
+            // must not manufacture a user edit event for every known file.
+            if previous.is_none() {
+                let mut documents = self.write_documents()?;
+                if let Some(document) = documents.get_mut(&uri) {
+                    if !document.open() {
+                        document.disk = Some(Arc::new(text));
+                    }
+                }
+                continue;
+            }
+            let same = previous.as_deref().map(String::as_str) == Some(text.as_str());
+            if same {
+                continue;
+            }
+            let mut documents = self.write_documents()?;
+            let Some(document) = documents.get_mut(&uri) else {
+                continue;
+            };
+            if document.open() {
+                continue;
+            }
+            document.disk = Some(Arc::new(text));
+            let generation = self.generations.next();
+            changed.push((uri, generation));
+        }
+        Ok(changed)
     }
 
     /// Ensure a document exists; returns whether it was newly created.
@@ -536,6 +658,30 @@ mod tests {
         assert!(store.knows(&found[0]));
         assert_eq!(
             (*store.content(&found[0]).expect("lazy load")).clone(),
+            "mncs 0.2;\n"
+        );
+    }
+
+    #[test]
+    fn discovery_after_baseline_returns_new_files_for_generation_binding() {
+        let dir = tempdir("discover-new");
+        fs::write(dir.join("initial.mncs"), "mncs 0.2;\n").expect("fixture");
+
+        let store = DocumentStore::new(Some(dir.clone()));
+        store.discover_workspace().expect("initial discovery");
+        assert!(store.refresh_disk().expect("initial baseline").is_empty());
+
+        fs::write(dir.join("new.mncs"), "mncs 0.2;\n").expect("new fixture");
+        let new_documents = store.discover_new_documents().expect("new discovery");
+        assert_eq!(new_documents.len(), 1);
+        assert!(new_documents[0].ends_with("new.mncs"));
+        let generation = store
+            .load_new_disk(&new_documents[0])
+            .expect("load new document")
+            .expect("new document generation");
+        assert_eq!(generation, 1);
+        assert_eq!(
+            store.content(&new_documents[0]).expect("content").as_str(),
             "mncs 0.2;\n"
         );
     }

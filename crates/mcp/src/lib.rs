@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mncs_service_core::LanguageService;
+use mncs_service_core::LanguageServiceClient;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
@@ -194,7 +194,7 @@ fn default_family_context_limit() -> u32 {
 /// The resident MNCS semantic service exposed through MCP.
 #[derive(Clone)]
 pub struct MncsSemanticServer {
-    service: Arc<LanguageService>,
+    service: Arc<dyn LanguageServiceClient>,
     root: Option<PathBuf>,
     tool_router: ToolRouter<MncsSemanticServer>,
 }
@@ -214,7 +214,19 @@ fn summary_line(value: &serde_json::Value) -> String {
 
 #[tool_router]
 impl MncsSemanticServer {
-    pub fn new(service: Arc<LanguageService>) -> Self {
+    pub fn new<S>(service: Arc<S>) -> Self
+    where
+        S: LanguageServiceClient + 'static,
+    {
+        let service: Arc<dyn LanguageServiceClient> = service;
+        Self {
+            service,
+            root: None,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    pub fn new_client(service: Arc<dyn LanguageServiceClient>) -> Self {
         Self {
             service,
             root: None,
@@ -235,8 +247,8 @@ impl MncsSemanticServer {
         result
     }
 
-    fn service(&self) -> &LanguageService {
-        &self.service
+    fn service(&self) -> &dyn LanguageServiceClient {
+        self.service.as_ref()
     }
 
     /// Resolve a possibly-relative document URI against the workspace root.
@@ -265,8 +277,10 @@ impl MncsSemanticServer {
         description = "Report workspace status: root, generation, every known MNCS document with open/buffer state, analysis currency, validity, and diagnostic counts."
     )]
     async fn workspace_status(&self) -> Result<CallToolResult, McpError> {
-        let status = self.service().workspace_status();
-        Ok(self.answered(serialize(&status)))
+        match self.service().workspace_status() {
+            Ok(status) => Ok(self.answered(serialize(&status))),
+            Err(error) => Ok(self.failed(error.to_string())),
+        }
     }
 
     #[tool(
@@ -460,10 +474,13 @@ impl MncsSemanticServer {
                 Err(error) => Ok(self.failed(error.to_string())),
             };
         }
-        let response = self
+        match self
             .service()
-            .workspace_symbols(name_filter.as_deref().unwrap_or(""));
-        Ok(self.answered(serialize(&response)))
+            .workspace_symbols(name_filter.as_deref().unwrap_or(""))
+        {
+            Ok(response) => Ok(self.answered(serialize(&response))),
+            Err(error) => Ok(self.failed(error.to_string())),
+        }
     }
 
     #[tool(

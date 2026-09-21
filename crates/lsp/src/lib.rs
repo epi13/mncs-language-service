@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use mncs_service_core::{
-    CompletionClass, LanguageService, ResponseStatus, SymbolKind as CoreSymbolKind, TokenClass,
+    CompletionClass, LanguageService, LanguageServiceClient, RemoteLanguageService, ResponseStatus,
+    SymbolKind as CoreSymbolKind, TokenClass,
 };
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::request::{
@@ -54,7 +55,7 @@ fn token_type_index(class: TokenClass) -> u32 {
 
 pub struct Backend {
     client: Client,
-    service: Arc<LanguageService>,
+    service: Arc<dyn LanguageServiceClient>,
 }
 
 impl Backend {
@@ -129,12 +130,7 @@ impl Backend {
                 data: None,
             }],
         };
-        let version = self
-            .service
-            .store()
-            .buffer_version(uri.as_str())
-            .ok()
-            .flatten();
+        let version = self.service.buffer_version(uri.as_str()).ok().flatten();
         let client = self.client.clone();
         let owned_uri = uri.clone();
         self.spawn_client_message(async move {
@@ -528,7 +524,9 @@ impl LanguageServer for Backend {
         &self,
         params: WorkspaceSymbolParams,
     ) -> Result<Option<Vec<SymbolInformation>>> {
-        let response = self.service.workspace_symbols(&params.query);
+        let Ok(response) = self.service.workspace_symbols(&params.query) else {
+            return Ok(Some(Vec::new()));
+        };
         Ok(Some(
             response
                 .symbols
@@ -770,7 +768,7 @@ impl LanguageServer for Backend {
         if response.already_formatted {
             return Ok(None);
         }
-        let Ok(text) = self.service.store().content(uri.as_str()) else {
+        let Ok(text) = self.service.content(uri.as_str()) else {
             return Ok(None);
         };
         let map = mncs_service_core::PositionMap::new(&text);
@@ -1053,7 +1051,12 @@ impl TokenBuilder {
 pub async fn run_stdio() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let (service, socket) = create_service(workspace_from_env());
+    let service: Arc<dyn LanguageServiceClient> = if let Some(path) = service_socket_from_env() {
+        Arc::new(RemoteLanguageService::connect_path(path))
+    } else {
+        Arc::new(LanguageService::new(workspace_from_env()))
+    };
+    let (service, socket) = create_service_with_client(service);
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 
@@ -1062,13 +1065,21 @@ pub async fn run_stdio() {
 pub fn create_service(
     workspace: Option<PathBuf>,
 ) -> (LspService<Backend>, tower_lsp::ClientSocket) {
-    LspService::build(|client| Backend {
-        client,
-        service: Arc::new(LanguageService::new(workspace)),
-    })
-    .finish()
+    create_service_with_client(Arc::new(LanguageService::new(workspace)))
+}
+
+/// Construct an LSP adapter over an already resident local or remote service.
+/// Multiple protocol adapters can therefore point at one workspace owner.
+pub fn create_service_with_client(
+    service: Arc<dyn LanguageServiceClient>,
+) -> (LspService<Backend>, tower_lsp::ClientSocket) {
+    LspService::build(|client| Backend { client, service }).finish()
 }
 
 fn workspace_from_env() -> Option<PathBuf> {
     std::env::var_os("MNLS_WORKSPACE_ROOT").map(PathBuf::from)
+}
+
+fn service_socket_from_env() -> Option<PathBuf> {
+    std::env::var_os("MNLS_SERVICE_SOCKET").map(PathBuf::from)
 }
