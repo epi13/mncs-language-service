@@ -677,6 +677,7 @@ impl LanguageServiceClient for RemoteLanguageService {
         )
         .unwrap_or_else(|error| WorkspaceEventCursor {
             schema_version: crate::WORKSPACE_EVENT_CURSOR_SCHEMA_VERSION.to_owned(),
+            stream_identity: String::new(),
             after_cursor,
             current_cursor: after_cursor,
             oldest_cursor: after_cursor.saturating_add(1),
@@ -1216,7 +1217,8 @@ fn dispatch(service: &LanguageService, method: &str, params: Value) -> Result<Va
         "buffer_version" => value(service.store().buffer_version(&text(&params, "uri")?)),
         "refresh_workspace" => value(service.refresh_workspace()),
         "workspace_status" => value(service.workspace_status()),
-        "poll_events" => serde_json::to_value(service.poll_events(
+        "poll_events" => serde_json::to_value(service.poll_events_for(
+            optional::<String>(&params, "stream_identity")?.as_deref(),
             parse(&params, "after_cursor")?,
             parse(&params, "max_events")?,
         ))

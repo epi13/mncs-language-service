@@ -6,6 +6,9 @@
 //! against so clients can detect staleness explicitly.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use mncs_model::{ObligationStatus, SemanticId};
@@ -99,6 +102,8 @@ pub enum OccurrenceRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceStatusResponse {
+    #[serde(default)]
+    pub stream_identity: String,
     pub workspace_root: Option<String>,
     pub generation: u64,
     #[serde(default)]
@@ -476,6 +481,56 @@ struct AnalysisSlot {
     snapshot: Arc<DocumentAnalysis>,
 }
 
+const WORKSPACE_CHECKPOINT_SCHEMA: &str = "mncs.workspace-checkpoint/1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkspaceCheckpoint {
+    schema_version: String,
+    workspace_root: String,
+    stream_identity: String,
+    last_generation: u64,
+    last_cursor: u64,
+    documents: BTreeMap<String, String>,
+}
+
+fn workspace_checkpoint_path(root: &Path) -> PathBuf {
+    root.join(".mncs")
+        .join("mnls-language-service.checkpoint.json")
+}
+
+fn load_workspace_checkpoint(
+    path: &Path,
+    root: &Path,
+) -> Result<Option<WorkspaceCheckpoint>, ServiceError> {
+    let raw = match fs::read(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(ServiceError::InvalidRequest {
+                reason: format!("could not read workspace checkpoint: {error}"),
+            });
+        }
+    };
+    let checkpoint: WorkspaceCheckpoint =
+        serde_json::from_slice(&raw).map_err(|error| ServiceError::InvalidRequest {
+            reason: format!("workspace checkpoint is malformed: {error}"),
+        })?;
+    if checkpoint.schema_version != WORKSPACE_CHECKPOINT_SCHEMA {
+        return Err(ServiceError::InvalidRequest {
+            reason: format!(
+                "workspace checkpoint schema is unsupported: {}",
+                checkpoint.schema_version
+            ),
+        });
+    }
+    if checkpoint.workspace_root != root.display().to_string()
+        || checkpoint.stream_identity.is_empty()
+    {
+        return Ok(None);
+    }
+    Ok(Some(checkpoint))
+}
+
 /// Resident MNCS language service core.
 ///
 /// One instance owns workspace/document state and the analysis snapshots
@@ -490,6 +545,7 @@ pub struct LanguageService {
     analyze_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     pub(crate) native_kernel: RwLock<Option<Arc<crate::native_query::NativeQueryKernel>>>,
     pub(crate) filter_kernel: RwLock<Option<Arc<crate::native_filter::NativeFilterKernel>>>,
+    checkpoint: Mutex<Option<WorkspaceCheckpoint>>,
 }
 
 impl Default for LanguageService {
@@ -507,6 +563,7 @@ impl LanguageService {
             analyze_locks: Mutex::new(BTreeMap::new()),
             native_kernel: RwLock::new(None),
             filter_kernel: RwLock::new(None),
+            checkpoint: Mutex::new(None),
         }
     }
 
@@ -530,14 +587,28 @@ impl LanguageService {
         self.events.poll(after_cursor, max_events)
     }
 
+    pub fn poll_events_for(
+        &self,
+        stream_identity: Option<&str>,
+        after_cursor: u64,
+        max_events: usize,
+    ) -> crate::events::WorkspaceEventCursor {
+        self.events
+            .poll_for(stream_identity, after_cursor, max_events)
+    }
+
     pub fn refresh_workspace(&self) -> Result<Vec<u64>, ServiceError> {
         let new_documents = self.store.discover_new_documents()?;
         let mut published = Vec::new();
         for uri in new_documents {
             if let Some(generation) = self.store.load_new_disk(&uri)? {
-                if let Some(cursor) =
-                    self.observe_change(&uri, generation.saturating_sub(1), generation, None)?
-                {
+                if let Some(cursor) = self.observe_change(
+                    &uri,
+                    generation.saturating_sub(1),
+                    generation,
+                    None,
+                    false,
+                )? {
                     published.push(cursor);
                 }
             }
@@ -559,6 +630,7 @@ impl LanguageService {
                 generation.saturating_sub(1),
                 generation,
                 before_by_uri.get(&uri).cloned(),
+                false,
             )? {
                 published.push(cursor);
             }
@@ -572,6 +644,7 @@ impl LanguageService {
         replaced_generation: u64,
         expected_generation: u64,
         before: Option<Arc<DocumentAnalysis>>,
+        reconciled: bool,
     ) -> Result<Option<u64>, ServiceError> {
         let after = self.snapshot(uri)?;
         // ReferenceCompiler is synchronous and cannot be interrupted.  The
@@ -582,15 +655,17 @@ impl LanguageService {
         {
             return Ok(None);
         }
-        let event = crate::events::project_change(
+        let mut event = crate::events::project_change(
             uri,
             replaced_generation,
             expected_generation,
             before.as_deref(),
             &after,
         );
+        event.reconciled = reconciled;
         let cursor = self.events.push(event);
         self.evict_stale_analyses();
+        self.persist_checkpoint()?;
         Ok(Some(cursor))
     }
 
@@ -606,7 +681,7 @@ impl LanguageService {
     pub fn did_open(&self, uri: &str, version: i32, text: String) -> Result<u64, ServiceError> {
         let (replaced_generation, before) = self.begin_change(uri);
         let generation = self.store.did_open(uri, version, text)?;
-        let _ = self.observe_change(uri, replaced_generation, generation, before)?;
+        let _ = self.observe_change(uri, replaced_generation, generation, before, false)?;
         Ok(generation)
     }
 
@@ -622,14 +697,14 @@ impl LanguageService {
     ) -> Result<u64, ServiceError> {
         let (replaced_generation, before) = self.begin_change(uri);
         let generation = self.store.did_change_incremental(uri, version, changes)?;
-        let _ = self.observe_change(uri, replaced_generation, generation, before)?;
+        let _ = self.observe_change(uri, replaced_generation, generation, before, false)?;
         Ok(generation)
     }
 
     pub fn did_save(&self, uri: &str, text: Option<String>) -> Result<u64, ServiceError> {
         let (replaced_generation, before) = self.begin_change(uri);
         let generation = self.store.did_save(uri, text)?;
-        let _ = self.observe_change(uri, replaced_generation, generation, before)?;
+        let _ = self.observe_change(uri, replaced_generation, generation, before, false)?;
         Ok(generation)
     }
 
@@ -638,7 +713,7 @@ impl LanguageService {
         let content = self.store.did_close(uri)?;
         if content.is_some() {
             let generation = self.store.generation();
-            let _ = self.observe_change(uri, replaced_generation, generation, before)?;
+            let _ = self.observe_change(uri, replaced_generation, generation, before, false)?;
         } else {
             self.evict_stale_analyses();
         }
@@ -656,8 +731,131 @@ impl LanguageService {
         &self,
         root: Option<std::path::PathBuf>,
     ) -> Result<Vec<String>, ServiceError> {
-        self.store.set_root(root);
-        self.store.discover_workspace()
+        let Some(root) = root else {
+            self.store.set_root(None);
+            if let Ok(mut checkpoint) = self.checkpoint.lock() {
+                *checkpoint = None;
+            }
+            return Ok(Vec::new());
+        };
+        let root = root
+            .canonicalize()
+            .map_err(|error| ServiceError::WorkspaceUnavailable {
+                path: format!("{}: {error}", root.display()),
+            })?;
+        let already_configured = self.store.workspace_root().as_deref() == Some(root.as_path())
+            && self
+                .checkpoint
+                .lock()
+                .ok()
+                .and_then(|checkpoint| checkpoint.as_ref().map(|_| ()))
+                .is_some();
+        if already_configured {
+            return Ok(self.store.document_uris());
+        }
+
+        self.store.set_root(Some(root.clone()));
+        let checkpoint_path = workspace_checkpoint_path(&root);
+        let checkpoint = load_workspace_checkpoint(&checkpoint_path, &root)?;
+        if let Some(checkpoint) = checkpoint.as_ref() {
+            self.store
+                .restore_generation_at_least(checkpoint.last_generation);
+            self.events
+                .restore_stream(checkpoint.stream_identity.clone(), checkpoint.last_cursor);
+        }
+        if let Ok(mut writable) = self.checkpoint.lock() {
+            *writable = Some(checkpoint.clone().unwrap_or_else(|| WorkspaceCheckpoint {
+                schema_version: WORKSPACE_CHECKPOINT_SCHEMA.to_owned(),
+                workspace_root: root.display().to_string(),
+                stream_identity: self.events.stream_identity(),
+                last_generation: self.store.generation(),
+                last_cursor: self.events.current_cursor(),
+                documents: BTreeMap::new(),
+            }));
+        }
+
+        let changed = self
+            .store
+            .reconcile_checkpoint(checkpoint.as_ref().map(|value| &value.documents))?;
+        for (uri, generation) in changed {
+            let _ =
+                self.observe_change(&uri, generation.saturating_sub(1), generation, None, true)?;
+        }
+        self.persist_checkpoint()?;
+        Ok(self.store.document_uris())
+    }
+
+    fn checkpoint_identities(&self) -> BTreeMap<String, String> {
+        self.store
+            .document_uris()
+            .into_iter()
+            .filter_map(|uri| {
+                let text = self.store.content(&uri).ok()?;
+                Some((uri.clone(), self.store.envelope(&uri, &text).identity))
+            })
+            .collect()
+    }
+
+    fn persist_checkpoint(&self) -> Result<(), ServiceError> {
+        let Some(root) = self.store.workspace_root() else {
+            return Ok(());
+        };
+        let path = workspace_checkpoint_path(&root);
+        let documents = self.checkpoint_identities();
+        let mut checkpoint = self
+            .checkpoint
+            .lock()
+            .map_err(|_| ServiceError::InvalidRequest {
+                reason: "workspace checkpoint state was poisoned".to_owned(),
+            })?
+            .clone()
+            .unwrap_or_else(|| WorkspaceCheckpoint {
+                schema_version: WORKSPACE_CHECKPOINT_SCHEMA.to_owned(),
+                workspace_root: root.display().to_string(),
+                stream_identity: self.events.stream_identity(),
+                last_generation: 0,
+                last_cursor: 0,
+                documents: BTreeMap::new(),
+            });
+        checkpoint.last_generation = self.store.generation();
+        checkpoint.last_cursor = self.events.current_cursor();
+        checkpoint.documents = documents;
+        let raw = serde_json::to_vec_pretty(&checkpoint).map_err(|error| {
+            ServiceError::InvalidRequest {
+                reason: format!("could not encode workspace checkpoint: {error}"),
+            }
+        })?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| ServiceError::InvalidRequest {
+                reason: format!("could not create checkpoint directory: {error}"),
+            })?;
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let temporary = path.with_extension(format!("json.{}-{nonce}.tmp", std::process::id()));
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|error| ServiceError::InvalidRequest {
+                reason: format!("could not open workspace checkpoint: {error}"),
+            })?;
+        file.write_all(&raw)
+            .and_then(|_| file.write_all(b"\n"))
+            .and_then(|_| file.sync_all())
+            .map_err(|error| ServiceError::InvalidRequest {
+                reason: format!("could not persist workspace checkpoint: {error}"),
+            })?;
+        fs::rename(&temporary, &path).map_err(|error| ServiceError::InvalidRequest {
+            reason: format!("could not publish workspace checkpoint: {error}"),
+        })?;
+        if let Ok(mut writable) = self.checkpoint.lock() {
+            *writable = Some(checkpoint);
+        }
+        Ok(())
     }
 
     /// Current fingerprint of a document's exact content: the authoritative
@@ -798,6 +996,7 @@ impl LanguageService {
         }
         documents.sort_by(|left, right| left.uri.cmp(&right.uri));
         Ok(WorkspaceStatusResponse {
+            stream_identity: self.events.stream_identity(),
             workspace_root: self.store.workspace_root_path(),
             generation: self.store.generation(),
             event_cursor: self.events.current_cursor(),

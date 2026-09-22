@@ -66,6 +66,20 @@ impl Generations {
     pub fn current(&self) -> u64 {
         self.0.load(Ordering::Relaxed)
     }
+
+    /// Restore a checkpoint floor without moving a live generation backward.
+    pub fn restore_at_least(&self, value: u64) {
+        let mut current = self.current();
+        while current < value {
+            match self
+                .0
+                .compare_exchange(current, value, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
 }
 
 /// Resident workspace/document state for one service instance.
@@ -101,6 +115,59 @@ impl DocumentStore {
 
     pub fn generation(&self) -> u64 {
         self.generations.current()
+    }
+
+    pub fn restore_generation_at_least(&self, value: u64) {
+        self.generations.restore_at_least(value);
+    }
+
+    /// Reconcile the disk baseline against the last compact Language Service
+    /// checkpoint.  The event log remains in-memory and bounded: only files
+    /// whose current identity differs from the checkpoint consume a new
+    /// generation.  With no checkpoint this establishes a quiet baseline.
+    pub fn reconcile_checkpoint(
+        &self,
+        checkpoint: Option<&BTreeMap<String, String>>,
+    ) -> Result<Vec<(String, u64)>, ServiceError> {
+        self.discover_workspace_impl(false)?;
+        let candidates: Vec<(String, PathBuf, bool)> = self
+            .read_documents()?
+            .iter()
+            .filter_map(|(uri, document)| {
+                let path = document.path.clone().or_else(|| path_from_uri(uri))?;
+                Some((uri.clone(), path, document.open()))
+            })
+            .collect();
+        let mut changed = Vec::new();
+        for (uri, path, open) in candidates {
+            if open {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            if text.len() > MAX_DOCUMENT_BYTES {
+                continue;
+            }
+            let identity = self.envelope(&uri, &text).identity;
+            let differs = checkpoint
+                .map(|values| values.get(&uri) != Some(&identity))
+                .unwrap_or(false);
+            let mut documents = self.write_documents()?;
+            let Some(document) = documents.get_mut(&uri) else {
+                continue;
+            };
+            if document.open() {
+                continue;
+            }
+            document.disk = Some(Arc::new(text));
+            document.path = Some(path);
+            drop(documents);
+            if differs {
+                changed.push((uri, self.generations.next()));
+            }
+        }
+        Ok(changed)
     }
 
     /// Discover `.mncs` files under the workspace root and register them as

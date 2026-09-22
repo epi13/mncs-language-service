@@ -35,8 +35,8 @@ cargo run -p mncs-service-core --bin mnls-language-service-host
 
 Set the same `MNLS_SERVICE_SOCKET` for `mncs-lsp`, `mncs-mcp`, and machine
 clients. They then share one workspace generation counter, exact source
-identities, semantic snapshots, and bounded `mncs.workspace-change/1` event
-cursor. The LSP and MCP implementations remain thin protocol adapters over
+identities, semantic snapshots, and bounded `mncs.workspace-change/2` events
+whose cursors carry an explicit stream identity. The LSP and MCP implementations remain thin protocol adapters over
 the `LanguageServiceClient` boundary; an in-process service is retained for
 tests and compatibility when no socket is configured.
 
@@ -145,8 +145,9 @@ LSP and MCP are adapters over one shared resident core. Neither protocol defines
 Workspace edits from LSP buffers and filesystem refreshes converge into the
 same monotonic generation model. Event consumers receive compact diagnostic,
 obligation, subject, impact, and limitation deltas rather than routine source
-or compiler-output dumps. Event history is bounded and cursor-based; when
-history ages out, consumers receive an explicit reset/UNKNOWN condition.
+or compiler-output dumps. Event history is bounded and cursor-based; a compact
+workspace checkpoint reconciles source identities after host restart, while
+history aging still produces an explicit reset/UNKNOWN condition.
 
 ## Ownership boundary
 

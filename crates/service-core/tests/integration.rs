@@ -91,6 +91,54 @@ fn filesystem_refresh_projects_complete_impact_from_resident_before_snapshot() {
 }
 
 #[test]
+fn restart_reconciles_offline_edit_without_reusing_cursor_alone() {
+    let root = std::env::temp_dir().join(format!(
+        "mncs-language-service-checkpoint-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("temporary workspace");
+    let path = root.join(CONTRACTS);
+    fs::copy(fixtures_dir().join(CONTRACTS), &path).expect("fixture copy");
+
+    let first = LanguageService::new(None);
+    first
+        .configure_root(Some(root.clone()))
+        .expect("initial checkpoint baseline");
+    let first_status = first.workspace_status().expect("initial status");
+    assert!(!first_status.stream_identity.is_empty());
+    assert_eq!(first_status.event_cursor, 0);
+    assert!(root
+        .join(".mncs/mnls-language-service.checkpoint.json")
+        .is_file());
+
+    let original = fs::read_to_string(&path).expect("read fixture copy");
+    fs::write(&path, original.replace("return next;", "return next + 1;")).expect("offline edit");
+
+    let second = LanguageService::new(None);
+    second
+        .configure_root(Some(root.clone()))
+        .expect("reconcile offline edit");
+    let status = second.workspace_status().expect("reconciled status");
+    assert_eq!(status.stream_identity, first_status.stream_identity);
+    assert!(status.event_cursor > first_status.event_cursor);
+    let cursor = second.poll_events_for(
+        Some(&first_status.stream_identity),
+        first_status.event_cursor,
+        8,
+    );
+    assert!(!cursor.reset_required);
+    let event = cursor.events.last().expect("offline reconciliation event");
+    assert!(event.reconciled);
+    assert!(!event.impact_complete);
+    assert_eq!(event.stream_identity, first_status.stream_identity);
+    fs::remove_dir_all(&root).expect("cleanup");
+}
+
+#[test]
 fn resident_socket_clients_share_generations_and_event_cursor() {
     let service = Arc::new(LanguageService::default());
     let socket = std::env::temp_dir().join(format!(

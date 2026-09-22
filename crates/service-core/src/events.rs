@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::analysis::DocumentAnalysis;
 
-pub const WORKSPACE_CHANGE_SCHEMA_VERSION: &str = "mncs.workspace-change/1";
-pub const WORKSPACE_EVENT_CURSOR_SCHEMA_VERSION: &str = "mncs.workspace-event-cursor/1";
+pub const WORKSPACE_CHANGE_SCHEMA_VERSION: &str = "mncs.workspace-change/2";
+pub const WORKSPACE_EVENT_CURSOR_SCHEMA_VERSION: &str = "mncs.workspace-event-cursor/2";
 const DEFAULT_EVENT_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +60,11 @@ pub struct WorkspaceObligationDelta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceChangeEvent {
     pub schema_version: String,
+    /// Explicit identity of the resident event stream.  A cursor is only
+    /// meaningful together with this value; host restarts may restore the
+    /// stream from the compact checkpoint or begin a new epoch.
+    #[serde(default)]
+    pub stream_identity: String,
     /// Monotonic cursor assigned by the resident service, independent of the
     /// workspace generation.  Cursors let clients resume without replaying a
     /// repository or retaining every transient keystroke forever.
@@ -82,6 +87,10 @@ pub struct WorkspaceChangeEvent {
     /// False means the compiler could not establish a complete semantic
     /// envelope; consumers must preserve UNKNOWN rather than widening scope.
     pub impact_complete: bool,
+    /// True when the change was reconstructed by comparing the durable
+    /// checkpoint with the workspace after the service was offline.
+    #[serde(default)]
+    pub reconciled: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limitations: Vec<String>,
 }
@@ -89,6 +98,8 @@ pub struct WorkspaceChangeEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceEventCursor {
     pub schema_version: String,
+    #[serde(default)]
+    pub stream_identity: String,
     pub after_cursor: u64,
     pub current_cursor: u64,
     pub oldest_cursor: u64,
@@ -101,6 +112,7 @@ pub struct WorkspaceEventCursor {
 
 #[derive(Debug)]
 struct EventState {
+    stream_identity: String,
     next_cursor: u64,
     events: VecDeque<WorkspaceChangeEvent>,
 }
@@ -125,14 +137,37 @@ impl Default for EventHub {
 
 impl EventHub {
     pub fn new(capacity: usize) -> Self {
+        Self::new_with_stream(capacity, new_stream_identity())
+    }
+
+    pub fn new_with_stream(capacity: usize, stream_identity: String) -> Self {
         Self {
             capacity: capacity.max(1),
             state: Mutex::new(EventState {
+                stream_identity,
                 next_cursor: 0,
                 events: VecDeque::new(),
             }),
             discarded: AtomicU64::new(0),
         }
+    }
+
+    /// Restore the compact stream checkpoint before any event is published.
+    /// Existing in-memory events are never relabeled.
+    pub fn restore_stream(&self, stream_identity: String, next_cursor: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.events.is_empty() {
+                state.stream_identity = stream_identity;
+                state.next_cursor = next_cursor;
+            }
+        }
+    }
+
+    pub fn stream_identity(&self) -> String {
+        self.state
+            .lock()
+            .map(|state| state.stream_identity.clone())
+            .unwrap_or_default()
     }
 
     pub fn push(&self, mut event: WorkspaceChangeEvent) -> u64 {
@@ -141,6 +176,7 @@ impl EventHub {
         };
         state.next_cursor = state.next_cursor.saturating_add(1);
         event.cursor = state.next_cursor;
+        event.stream_identity = state.stream_identity.clone();
         if state.events.len() >= self.capacity {
             state.events.pop_front();
             self.discarded.fetch_add(1, Ordering::Relaxed);
@@ -157,9 +193,19 @@ impl EventHub {
     }
 
     pub fn poll(&self, after_cursor: u64, max_events: usize) -> WorkspaceEventCursor {
+        self.poll_for(None, after_cursor, max_events)
+    }
+
+    pub fn poll_for(
+        &self,
+        requested_stream_identity: Option<&str>,
+        after_cursor: u64,
+        max_events: usize,
+    ) -> WorkspaceEventCursor {
         let Ok(state) = self.state.lock() else {
             return WorkspaceEventCursor {
                 schema_version: WORKSPACE_EVENT_CURSOR_SCHEMA_VERSION.to_owned(),
+                stream_identity: String::new(),
                 after_cursor,
                 current_cursor: after_cursor,
                 oldest_cursor: after_cursor.saturating_add(1),
@@ -168,13 +214,15 @@ impl EventHub {
                 limitations: vec!["event hub state was unavailable".to_owned()],
             };
         };
+        let stream_mismatch =
+            requested_stream_identity.is_some_and(|requested| requested != state.stream_identity);
         let oldest_cursor = state
             .events
             .front()
             .map(|event| event.cursor)
             .unwrap_or_else(|| state.next_cursor.saturating_add(1));
-        let reset_required =
-            after_cursor.saturating_add(1) < oldest_cursor && after_cursor < state.next_cursor;
+        let reset_required = stream_mismatch
+            || (after_cursor.saturating_add(1) < oldest_cursor && after_cursor < state.next_cursor);
         let events = if reset_required {
             Vec::new()
         } else {
@@ -193,8 +241,14 @@ impl EventHub {
                 "{discarded} transient events have aged out of the bounded cursor history"
             ));
         }
+        if stream_mismatch {
+            limitations.push(
+                "requested cursor belongs to a different Language Service event stream".to_owned(),
+            );
+        }
         WorkspaceEventCursor {
             schema_version: WORKSPACE_EVENT_CURSOR_SCHEMA_VERSION.to_owned(),
+            stream_identity: state.stream_identity.clone(),
             after_cursor,
             current_cursor: state.next_cursor,
             oldest_cursor,
@@ -203,6 +257,14 @@ impl EventHub {
             limitations,
         }
     }
+}
+
+fn new_stream_identity() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("mnls-stream-{}-{nanos}", std::process::id())
 }
 
 fn diagnostic_codes(analysis: Option<&DocumentAnalysis>) -> BTreeSet<String> {
@@ -369,6 +431,7 @@ pub fn project_change(
     };
     WorkspaceChangeEvent {
         schema_version: WORKSPACE_CHANGE_SCHEMA_VERSION.to_owned(),
+        stream_identity: String::new(),
         cursor: 0,
         replaced_generation,
         current_generation,
@@ -380,6 +443,7 @@ pub fn project_change(
         impact_identity,
         impact,
         impact_complete,
+        reconciled: false,
         limitations,
     }
 }
