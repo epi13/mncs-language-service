@@ -214,8 +214,12 @@ impl EventHub {
                 limitations: vec!["event hub state was unavailable".to_owned()],
             };
         };
-        let stream_mismatch =
-            requested_stream_identity.is_some_and(|requested| requested != state.stream_identity);
+        // A nonzero cursor without its stream identity is not safe to resume:
+        // the same number may belong to a different host epoch.  Initial
+        // cursor-zero polling remains valid for compatibility clients.
+        let stream_mismatch = requested_stream_identity
+            .map(|requested| requested != state.stream_identity)
+            .unwrap_or(after_cursor > 0);
         let oldest_cursor = state
             .events
             .front()
@@ -242,9 +246,11 @@ impl EventHub {
             ));
         }
         if stream_mismatch {
-            limitations.push(
-                "requested cursor belongs to a different Language Service event stream".to_owned(),
-            );
+            limitations.push(if requested_stream_identity.is_some() {
+                "requested cursor belongs to a different Language Service event stream".to_owned()
+            } else {
+                "a nonzero cursor requires its Language Service event-stream identity".to_owned()
+            });
         }
         WorkspaceEventCursor {
             schema_version: WORKSPACE_EVENT_CURSOR_SCHEMA_VERSION.to_owned(),

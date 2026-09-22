@@ -135,6 +135,12 @@ fn restart_reconciles_offline_edit_without_reusing_cursor_alone() {
     assert!(event.reconciled);
     assert!(!event.impact_complete);
     assert_eq!(event.stream_identity, first_status.stream_identity);
+    let cursor_only = second.poll_events(status.event_cursor, 8);
+    assert!(cursor_only.reset_required);
+    assert!(cursor_only
+        .limitations
+        .iter()
+        .any(|item| item.contains("event-stream identity")));
     fs::remove_dir_all(&root).expect("cleanup");
 }
 
