@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-language-service",
-  "revision": 4,
+  "revision": 5,
   "manifest_location": "in-repository",
   "authority": {"note": "Language Service owns resident query/protocol projections and bounded family context; mncs-language owns language semantics and Commons owns family architecture/pressure facts."},
   "organization": {
@@ -10,7 +10,10 @@
       {"path": "crates/service-core/", "class": "canonical", "authority": "mncs-language-service", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
       {"path": "crates/lsp/", "class": "host-boundary", "note": "LSP transport adapter.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "protocol", "semantic_role": "platform-adapter"}},
       {"path": "crates/mcp/", "class": "host-boundary", "note": "MCP transport adapter.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "protocol", "semantic_role": "platform-adapter"}},
-      {"path": "crates/service-core/src/family_context.rs", "class": "canonical", "note": "Bounded family preflight composition; source facts remain externally owned.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "protocol", "semantic_role": "canonical-semantic"}}
+      {"path": "crates/service-core/src/family_context.rs", "class": "canonical", "note": "Bounded family preflight composition; source facts remain externally owned.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "protocol", "semantic_role": "canonical-semantic"}},
+      {"path": "crates/service-core/src/ambient.rs", "class": "canonical", "note": "Ambient observation boundary: resident status projection and measured capsule assembly; admission policy stays in MNCS.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "protocol", "semantic_role": "canonical-semantic"}},
+      {"path": "mncs/semantic_capsule.mncs", "class": "canonical", "authority": "mncs-language-service", "note": "Native capsule admission policy: relevance classification, budgets, overflow, completeness.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
+      {"path": "tools/", "class": "host-boundary", "note": "Provider-owned resident lifecycle transport (status/ensure/stop/poll/capsule/query); no semantic policy.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "protocol", "semantic_role": "platform-adapter"}}
     ]
   },
   "verification": {
@@ -20,7 +23,12 @@
   "contracts": {
     "provides": [
       {"contract": "language-tooling", "version": "1", "kind": "lsp-mcp-service", "stability": "experimental", "fingerprint_sources": ["crates/service-core/", "crates/lsp/", "crates/mcp/"]},
-      {"contract": "family-agent-context", "version": "2", "kind": "bounded-authoritative-projection", "stability": "experimental", "fingerprint_sources": ["crates/service-core/src/family_context.rs", "docs/family-agent-context.md"]}
+      {"contract": "family-agent-context", "version": "2", "kind": "bounded-authoritative-projection", "stability": "experimental", "fingerprint_sources": ["crates/service-core/src/family_context.rs", "docs/family-agent-context.md"]},
+      {"contract": "resident-status", "version": "1", "kind": "resident-lifecycle-probe", "stability": "experimental", "effects": ["read"], "fingerprint_sources": ["tools/mnls_provider.py", "crates/service-core/src/ambient.rs"], "invocation": {"kind": "python", "path": "tools/mnls_provider.py", "fixed_argv": ["status"]}},
+      {"contract": "resident-reconcile", "version": "1", "kind": "resident-lifecycle-recovery", "stability": "experimental", "effects": ["execute"], "fingerprint_sources": ["tools/mnls_provider.py"], "invocation": {"kind": "python", "path": "tools/mnls_provider.py", "fixed_argv": ["ensure"]}},
+      {"contract": "semantic-poll", "version": "1", "kind": "resident-event-resume", "stability": "experimental", "effects": ["read"], "fingerprint_sources": ["tools/mnls_provider.py", "crates/service-core/src/events.rs"], "invocation": {"kind": "python", "path": "tools/mnls_provider.py", "fixed_argv": ["poll"]}},
+      {"contract": "semantic-capsule", "version": "1", "kind": "bounded-semantic-projection", "stability": "experimental", "effects": ["read"], "fingerprint_sources": ["tools/mnls_provider.py", "crates/service-core/src/ambient.rs", "mncs/semantic_capsule.mncs"], "invocation": {"kind": "python", "path": "tools/mnls_provider.py", "fixed_argv": ["capsule"]}},
+      {"contract": "semantic-query", "version": "1", "kind": "bounded-resident-query", "stability": "experimental", "effects": ["read"], "fingerprint_sources": ["tools/mnls_provider.py", "crates/service-core/src/client.rs"], "invocation": {"kind": "python", "path": "tools/mnls_provider.py", "fixed_argv": ["query"]}}
     ],
     "consumes": [
       {"contract": "mncs-language.semantic-identity", "envelope": {"op": "any"}, "required": true, "evidence_refs": ["README.md"]},
@@ -28,6 +36,9 @@
       {"contract": "mncs-commons.family-architecture", "envelope": {"op": "any"}, "required": true},
       {"contract": "mncs-commons.pressure-registry", "envelope": {"op": "any"}, "required": false}
     ],
-    "tests": [{"test": "language-service-tests", "covers": ["language-tooling"], "obligation": "self", "command": {"argv": ["cargo", "test", "--workspace"]}}]
+    "tests": [
+      {"test": "language-service-tests", "covers": ["language-tooling"], "obligation": "self", "command": {"argv": ["cargo", "test", "--workspace"]}},
+      {"test": "provider-tests", "covers": ["resident-status", "resident-reconcile", "semantic-poll", "semantic-capsule", "semantic-query"], "obligation": "self", "command": {"argv": ["python3", "tools/test_mnls_provider.py"], "timeout_seconds": 600}}
+    ]
   }
 }
