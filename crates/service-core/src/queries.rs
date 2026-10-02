@@ -491,6 +491,11 @@ struct WorkspaceCheckpoint {
     last_generation: u64,
     last_cursor: u64,
     documents: BTreeMap<String, String>,
+    /// Toolchain binding at checkpoint time. Optional so checkpoints
+    /// written before toolchain binding still load; a present binding
+    /// that no longer matches forces a fresh event stream.
+    #[serde(default)]
+    toolchain_identity: Option<crate::ambient::ToolchainIdentity>,
 }
 
 fn workspace_checkpoint_path(root: &Path) -> PathBuf {
@@ -545,7 +550,9 @@ pub struct LanguageService {
     analyze_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     pub(crate) native_kernel: RwLock<Option<Arc<crate::native_query::NativeQueryKernel>>>,
     pub(crate) filter_kernel: RwLock<Option<Arc<crate::native_filter::NativeFilterKernel>>>,
+    pub(crate) capsule_kernel: RwLock<Option<Arc<crate::ambient::CapsuleKernel>>>,
     checkpoint: Mutex<Option<WorkspaceCheckpoint>>,
+    instance_id: String,
 }
 
 impl Default for LanguageService {
@@ -563,8 +570,32 @@ impl LanguageService {
             analyze_locks: Mutex::new(BTreeMap::new()),
             native_kernel: RwLock::new(None),
             filter_kernel: RwLock::new(None),
+            capsule_kernel: RwLock::new(None),
             checkpoint: Mutex::new(None),
+            instance_id: crate::ambient::new_instance_id(),
         }
+    }
+
+    /// Process-bound instance identity, distinct across restarts even when
+    /// the event stream is restored from the durable checkpoint.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// Compact observation of the durable checkpoint for ambient status.
+    pub(crate) fn checkpoint_observation(&self) -> Option<crate::ambient::CheckpointObservation> {
+        let checkpoint = self.checkpoint.lock().ok()?.clone()?;
+        let current = crate::ambient::ToolchainIdentity::current();
+        Some(crate::ambient::CheckpointObservation {
+            stream_identity: checkpoint.stream_identity,
+            last_generation: checkpoint.last_generation,
+            last_cursor: checkpoint.last_cursor,
+            toolchain_matches_current: checkpoint
+                .toolchain_identity
+                .as_ref()
+                .map(|bound| bound == &current)
+                .unwrap_or(true),
+        })
     }
 
     pub fn store(&self) -> &DocumentStore {
@@ -757,11 +788,24 @@ impl LanguageService {
         self.store.set_root(Some(root.clone()));
         let checkpoint_path = workspace_checkpoint_path(&root);
         let checkpoint = load_workspace_checkpoint(&checkpoint_path, &root)?;
+        let current_toolchain = crate::ambient::ToolchainIdentity::current();
+        // A toolchain change invalidates stream continuity: identical bytes
+        // under a different toolchain may mean different semantics, so the
+        // restored cursor must not resume silently. Generation continuity
+        // is kept (it counts workspace changes, not meanings) while the
+        // stream starts a fresh epoch consumers must reconcile against.
+        let toolchain_changed = checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.toolchain_identity.as_ref())
+            .map(|bound| bound != &current_toolchain)
+            .unwrap_or(false);
         if let Some(checkpoint) = checkpoint.as_ref() {
             self.store
                 .restore_generation_at_least(checkpoint.last_generation);
-            self.events
-                .restore_stream(checkpoint.stream_identity.clone(), checkpoint.last_cursor);
+            if !toolchain_changed {
+                self.events
+                    .restore_stream(checkpoint.stream_identity.clone(), checkpoint.last_cursor);
+            }
         }
         if let Ok(mut writable) = self.checkpoint.lock() {
             *writable = Some(checkpoint.clone().unwrap_or_else(|| WorkspaceCheckpoint {
@@ -771,7 +815,15 @@ impl LanguageService {
                 last_generation: self.store.generation(),
                 last_cursor: self.events.current_cursor(),
                 documents: BTreeMap::new(),
+                toolchain_identity: Some(current_toolchain.clone()),
             }));
+            if toolchain_changed {
+                if let Some(writable) = writable.as_mut() {
+                    writable.stream_identity = self.events.stream_identity();
+                    writable.last_cursor = self.events.current_cursor();
+                    writable.toolchain_identity = Some(current_toolchain.clone());
+                }
+            }
         }
 
         let changed = self
@@ -816,10 +868,12 @@ impl LanguageService {
                 last_generation: 0,
                 last_cursor: 0,
                 documents: BTreeMap::new(),
+                toolchain_identity: Some(crate::ambient::ToolchainIdentity::current()),
             });
         checkpoint.last_generation = self.store.generation();
         checkpoint.last_cursor = self.events.current_cursor();
         checkpoint.documents = documents;
+        checkpoint.toolchain_identity = Some(crate::ambient::ToolchainIdentity::current());
         let raw = serde_json::to_vec_pretty(&checkpoint).map_err(|error| {
             ServiceError::InvalidRequest {
                 reason: format!("could not encode workspace checkpoint: {error}"),

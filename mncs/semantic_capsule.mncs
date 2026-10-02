@@ -1,0 +1,136 @@
+mncs 0.13;
+
+// mncs.language_service.semantic_capsule.v1 — native capsule admission policy.
+//
+// The resident host projects measured workspace findings into the fixed
+// envelope in deterministic priority order (severity rank, then kind rank,
+// then identity). This module owns every selection decision: relevance
+// classification, budget admission, overflow accounting, and the
+// completeness verdict. The host applies the returned admission flags
+// mechanically and must not widen them.
+//
+// Severity ranks: 0 = info, 1 = warning, 2 = error.
+// Finding kinds: 0 = diagnostic, 1 = changed subject, 2 = obligation,
+// 3 = affected module.
+// Relevance ranks: 0 = informational (context only, never admitted),
+// 1 = watch, 2 = actionable.
+module mncs.language_service.semantic_capsule.v1;
+
+record CapsuleFinding {
+    severity: i64,
+    kind: i64
+}
+
+record CapsuleBudgets {
+    max_actionable: byte,
+    max_watch: byte,
+    max_total: byte
+}
+
+record CapsuleScan {
+    admitted: [bool; 32],
+    relevance: [i64; 32],
+    actionable_spent: i64,
+    watch_spent: i64,
+    total_spent: i64,
+    dropped: i64
+}
+
+record CapsuleSelection {
+    admitted: [bool; 32],
+    relevance: [i64; 32],
+    admitted_count: i64,
+    actionable_count: i64,
+    watch_count: i64,
+    dropped_count: i64,
+    complete: bool,
+    valid: bool
+}
+
+// Relevance classification. Errors that name broken source are actionable;
+// warnings and churn adjacent to a change are watch; pure context stays
+// informational and is never admitted to the bounded capsule body.
+fn classify(severity: i64, kind: i64) -> (result: i64) {
+    if kind == 0 {
+        if severity == 2 {
+            return 2;
+        }
+        if severity == 1 {
+            return 2;
+        }
+        return 0;
+    }
+    if kind == 1 {
+        if severity == 2 {
+            return 2;
+        }
+        return 1;
+    }
+    if kind == 2 {
+        if severity == 2 {
+            return 2;
+        }
+        if severity == 1 {
+            return 1;
+        }
+        return 0;
+    }
+    if severity == 2 {
+        return 1;
+    }
+    if severity == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+fn select_capsule(
+    findings: [CapsuleFinding; 32],
+    count: byte
+) -> (result: CapsuleSelection) {
+    // Admission budgets are policy, not caller input: the host supplies
+    // measured ranks only and can never widen these bounds.
+    let budgets: CapsuleBudgets = CapsuleBudgets {
+        max_actionable: 16,
+        max_watch: 8,
+        max_total: 20
+    };
+    let start: CapsuleScan = CapsuleScan {
+        admitted: [false; 32],
+        relevance: [0; 32],
+        actionable_spent: 0,
+        watch_spent: 0,
+        total_spent: 0,
+        dropped: 0
+    };
+    iterate i over findings carrying scan: CapsuleScan = start {
+        let active: bool = (i as i64) < (count as i64);
+        let relevance: i64 = select(active, classify(findings[i].severity, findings[i].kind), 0);
+        let actionable_open: bool = relevance == 2
+            && scan.actionable_spent < (budgets.max_actionable as i64)
+            && scan.total_spent < (budgets.max_total as i64);
+        let watch_open: bool = relevance == 1
+            && scan.watch_spent < (budgets.max_watch as i64)
+            && scan.total_spent < (budgets.max_total as i64);
+        let admit: bool = active && (actionable_open || watch_open);
+        next scan = CapsuleScan {
+            ..scan,
+            admitted: replace(scan.admitted, i, admit),
+            relevance: replace(scan.relevance, i, select(active, relevance, 0)),
+            actionable_spent: scan.actionable_spent + select(admit && relevance == 2, 1, 0),
+            watch_spent: scan.watch_spent + select(admit && relevance == 1, 1, 0),
+            total_spent: scan.total_spent + select(admit, 1, 0),
+            dropped: scan.dropped + select(active && !admit, 1, 0)
+        };
+    }
+    return CapsuleSelection {
+        admitted: scan.admitted,
+        relevance: scan.relevance,
+        admitted_count: scan.total_spent,
+        actionable_count: scan.actionable_spent,
+        watch_count: scan.watch_spent,
+        dropped_count: scan.dropped,
+        complete: scan.total_spent + scan.dropped == (count as i64),
+        valid: true
+    };
+}

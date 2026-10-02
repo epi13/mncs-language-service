@@ -19,8 +19,9 @@ use crate::{
     InlayHintsResponse, LanguageCapabilitiesResponse, LanguageService, NativeKindCountResponse,
     NativeObligationsResponse, PositionQueryResponse, PrepareCallHierarchyResponse,
     RangeFormattingResponse, ReferencesResponse, RenameResponse, SelectionRangesResponse,
-    SemanticTokensResponse, ServiceError, SignatureHelpResponse, TextChange, WorkspaceEventCursor,
-    WorkspaceStatusResponse, WorkspaceSymbolsResponse,
+    SemanticCapsuleResponse, SemanticTokensResponse, ServiceError, ServiceStatusResponse,
+    SignatureHelpResponse, TextChange, WorkspaceEventCursor, WorkspaceStatusResponse,
+    WorkspaceSymbolsResponse,
 };
 
 /// Shared service surface consumed by local protocol adapters and remote
@@ -42,6 +43,12 @@ pub trait LanguageServiceClient: Send + Sync {
     fn buffer_version(&self, uri: &str) -> Result<Option<i32>, ServiceError>;
     fn refresh_workspace(&self) -> Result<Vec<u64>, ServiceError>;
     fn workspace_status(&self) -> Result<WorkspaceStatusResponse, ServiceError>;
+    fn service_status(&self) -> Result<ServiceStatusResponse, ServiceError>;
+    fn semantic_capsule(
+        &self,
+        known_stream_identity: Option<&str>,
+        known_cursor: u64,
+    ) -> Result<SemanticCapsuleResponse, ServiceError>;
     fn poll_events(&self, after_cursor: u64, max_events: usize) -> WorkspaceEventCursor;
 
     fn language_capabilities(
@@ -261,6 +268,16 @@ impl LanguageServiceClient for LanguageService {
     }
     fn workspace_status(&self) -> Result<WorkspaceStatusResponse, ServiceError> {
         LanguageService::workspace_status(self)
+    }
+    fn service_status(&self) -> Result<ServiceStatusResponse, ServiceError> {
+        LanguageService::service_status(self)
+    }
+    fn semantic_capsule(
+        &self,
+        known_stream_identity: Option<&str>,
+        known_cursor: u64,
+    ) -> Result<SemanticCapsuleResponse, ServiceError> {
+        LanguageService::semantic_capsule(self, known_stream_identity, known_cursor)
     }
     fn poll_events(&self, after_cursor: u64, max_events: usize) -> WorkspaceEventCursor {
         LanguageService::poll_events(self, after_cursor, max_events)
@@ -669,6 +686,21 @@ impl LanguageServiceClient for RemoteLanguageService {
     }
     fn workspace_status(&self) -> Result<WorkspaceStatusResponse, ServiceError> {
         remote_call!(self, "workspace_status", json!({}), WorkspaceStatusResponse)
+    }
+    fn service_status(&self) -> Result<ServiceStatusResponse, ServiceError> {
+        remote_call!(self, "service_status", json!({}), ServiceStatusResponse)
+    }
+    fn semantic_capsule(
+        &self,
+        known_stream_identity: Option<&str>,
+        known_cursor: u64,
+    ) -> Result<SemanticCapsuleResponse, ServiceError> {
+        remote_call!(
+            self,
+            "semantic_capsule",
+            json!({"known_stream_identity": known_stream_identity, "known_cursor": known_cursor}),
+            SemanticCapsuleResponse
+        )
     }
     fn poll_events(&self, after_cursor: u64, max_events: usize) -> WorkspaceEventCursor {
         self.call(
@@ -1217,6 +1249,19 @@ fn dispatch(service: &LanguageService, method: &str, params: Value) -> Result<Va
         "buffer_version" => value(service.store().buffer_version(&text(&params, "uri")?)),
         "refresh_workspace" => value(service.refresh_workspace()),
         "workspace_status" => value(service.workspace_status()),
+        "service_status" => value(service.service_status()),
+        "semantic_capsule" => {
+            let known: Option<String> = optional(&params, "known_stream_identity")?;
+            value(
+                service.semantic_capsule(
+                    known.as_deref(),
+                    params
+                        .get("known_cursor")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                ),
+            )
+        }
         "poll_events" => serde_json::to_value(service.poll_events_for(
             optional::<String>(&params, "stream_identity")?.as_deref(),
             parse(&params, "after_cursor")?,

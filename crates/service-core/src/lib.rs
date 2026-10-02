@@ -11,6 +11,7 @@
 //! `mncs-syntax`, `mncs-compiler`, or `mncs-model`.
 
 mod actions;
+pub mod ambient;
 mod analysis;
 mod candidate;
 mod client;
@@ -33,6 +34,12 @@ mod rename;
 mod render;
 
 pub use actions::{CodeAction, CodeActionsResponse};
+pub use ambient::{
+    CapsuleFinding, CapsulePolicyEvidence, CheckpointObservation, DiagnosticTotals,
+    ExpansionHandle, MeasuredTotals, ObligationTotals, ReadinessState, SemanticCapsuleResponse,
+    ServiceIdentity, ServiceStatusResponse, ToolchainIdentity, AMBIENT_FEATURES,
+    CAPSULE_ENVELOPE_CAPACITY, SEMANTIC_CAPSULE_SCHEMA_VERSION, SERVICE_STATUS_SCHEMA_VERSION,
+};
 pub use analysis::DocumentAnalysis;
 pub use candidate::{
     CandidateAnalysisResponse, CandidateObligation, ChangedIdentity, DiagnosticsDelta,
