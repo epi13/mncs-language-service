@@ -52,7 +52,7 @@ and receive bounded JSON.
 
 | Op | Effect | Meaning |
 |----|--------|---------|
-| `status` | read | Probe: state, identities, generation, stream, cursor, totals |
+| `status` | read | Probe: converge to disk, then state, identities, generation, stream, cursor, totals |
 | `ensure` | execute | Bounded reconcile: attach, or start when absent/stale |
 | `stop` | execute | Stop only a provider-owned lease; never foreign |
 | `poll` | read | Resume the event stream (stream identity required) |
@@ -82,6 +82,14 @@ Safety rules (tested in `tools/test_mnls_provider.py`):
 - `stop` is idempotent and verifies the leased instance before
   signaling; interrupted starts are adopted only when the live
   socket reports the same workspace.
+- Every probe first reconciles the resident to disk truth through
+  `refresh_workspace`: shell-made edits bypass LSP notifications,
+  so a probe that only reads resident state would report stale
+  generations as current. Refresh is idempotent and bounded
+  (quiet workspaces pay reads only; only actual changes analyze),
+  converges state rather than diverging it, and mutates no source,
+  which is why the probe keeps read effects. The reconciler's
+  event source converges the same way before polling.
 
 ## Identity model
 
