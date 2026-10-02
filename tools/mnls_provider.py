@@ -344,6 +344,10 @@ def status_document(workspace: Path, timeout: float) -> dict:
         # so the ambient semantic pass can compare generations without
         # re-invoking the probe on quiet entries.
         document["observed"] = {
+            "event_transport": {"identity": "mncs-language-service:" + str(workspace),
+                "service_identity": "mncs-language-service:" + str(workspace),
+                "provider": "mncs-language-service", "protocol": "mncs.workspace-event-cursor/2",
+                "socket": str(socket_path(workspace)), "workspace": str(workspace)},
             "generation": observed.get("generation"),
             "stream_identity": observed.get("stream_identity"),
             "event_cursor": observed.get("event_cursor"),
