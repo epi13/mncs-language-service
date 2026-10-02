@@ -58,6 +58,7 @@ QUERY_ALLOWLIST = frozenset({
     "workspace_symbols",
     "dependencies",
     "dependents",
+    "semantic_impact",
     "obligations",
     "native_obligations",
     "native_kind_count",

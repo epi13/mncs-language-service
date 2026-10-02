@@ -14,7 +14,7 @@
 //! the admission policy; correctness is established by executed-behavior
 //! tests against the real kernel, not by a duplicated decision procedure.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
 use mncs_codegen::{execute_backend, RESEARCH_BYTECODE_BACKEND_NAME};
@@ -33,6 +33,7 @@ use crate::queries::{ResponseStatus, SnapshotInfo};
 
 pub const SERVICE_STATUS_SCHEMA_VERSION: &str = "mncs.language-service.service-status/1";
 pub const SEMANTIC_CAPSULE_SCHEMA_VERSION: &str = "mncs.language-service.semantic-capsule/1";
+pub const SEMANTIC_IMPACT_SCHEMA_VERSION: &str = "mncs.language-service.semantic-impact/1";
 
 /// Fixed policy envelope: at most this many measured findings are projected
 /// into one capsule evaluation. The bound is shared with the MNCS module.
@@ -1063,6 +1064,103 @@ impl crate::queries::LanguageService {
             unresolved,
             limitations,
             snapshot: None,
+        })
+    }
+}
+
+/// Structured semantic impact for one subject: direct dependency edges,
+// the bounded compiler-owned impact neighborhood, and the obligations
+// whose subjects fall inside the affected set. This publishes semantic
+// facts; verification owners decide what the facts invalidate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticImpactResponse {
+    pub schema_version: String,
+    pub status: ResponseStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<SnapshotInfo>,
+    pub subject_identity: String,
+    pub dependencies: crate::queries::GraphResponse,
+    pub dependents: crate::queries::GraphResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impact: Option<mncs_model::SemanticImpact>,
+    pub impact_complete: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_obligations: Vec<crate::queries::ObligationInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitations: Vec<String>,
+}
+
+impl crate::queries::LanguageService {
+    /// On-demand impact for any resolved identity: single-hop edges plus
+    /// the bounded neighborhood (depth 2, 256 nodes) and affected
+    /// obligations. Mirrors the event-path impact projection so ambient
+    /// consumers and verification owners share one vocabulary.
+    pub fn semantic_impact(
+        &self,
+        uri: &str,
+        identity: &str,
+    ) -> Result<SemanticImpactResponse, ServiceError> {
+        let snapshot = self.snapshot(uri)?;
+        let info = crate::queries::snapshot_info(uri, &snapshot);
+        let dependencies = self.graph_query(uri, identity, true)?;
+        let dependents = self.graph_query(uri, identity, false)?;
+        let mut limitations = Vec::new();
+        let mut impact = None;
+        let mut impact_complete = false;
+        let mut affected: BTreeSet<String> = BTreeSet::from([identity.to_owned()]);
+        if let Some(program) = snapshot.front_end.program.as_ref() {
+            match program.semantic_graph() {
+                Ok(graph) => {
+                    let projected = graph.impact_neighborhood(
+                        &[mncs_model::SemanticId(identity.to_owned())],
+                        2,
+                        256,
+                    );
+                    impact_complete = projected.complete;
+                    for node in &projected.nodes {
+                        affected.insert(node.identity.0.clone());
+                    }
+                    for edge in &projected.edges {
+                        affected.insert(edge.from.0.clone());
+                        affected.insert(edge.to.0.clone());
+                    }
+                    impact = Some(projected);
+                }
+                Err(_) => {
+                    limitations
+                        .push("the current program could not produce a semantic graph".to_owned());
+                }
+            }
+        } else {
+            limitations.push("impact neighborhood requires a valid elaborated program".to_owned());
+        }
+        let mut affected_obligations = Vec::new();
+        match self.obligations(uri, None) {
+            Ok(response) => {
+                for obligation in response.obligations {
+                    if affected.contains(&obligation.subject)
+                        || affected.contains(&obligation.identity)
+                    {
+                        affected_obligations.push(obligation);
+                    }
+                }
+            }
+            Err(_) => {
+                limitations.push("obligations unavailable for this snapshot".to_owned());
+            }
+        }
+        affected_obligations.sort_by(|left, right| left.identity.cmp(&right.identity));
+        Ok(SemanticImpactResponse {
+            schema_version: SEMANTIC_IMPACT_SCHEMA_VERSION.to_owned(),
+            status: ResponseStatus::Answered,
+            snapshot: Some(info),
+            subject_identity: identity.to_owned(),
+            dependencies,
+            dependents,
+            impact,
+            impact_complete,
+            affected_obligations,
+            limitations,
         })
     }
 }

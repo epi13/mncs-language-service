@@ -1942,7 +1942,7 @@ impl LanguageService {
         self.graph_query(uri, identity, false)
     }
 
-    fn graph_query(
+    pub(crate) fn graph_query(
         &self,
         uri: &str,
         identity: &str,

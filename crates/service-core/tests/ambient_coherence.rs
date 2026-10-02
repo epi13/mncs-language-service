@@ -299,6 +299,64 @@ fn restart_restores_stream_but_toolchain_change_forces_a_new_epoch() {
 }
 
 #[test]
+fn semantic_impact_combines_edges_neighborhood_and_obligations() {
+    let root = temp_workspace("impact");
+    seed_workspace(&root, &["valid-contracts.mncs"]);
+    let service = LanguageService::new(None);
+    service
+        .configure_root(Some(root.clone()))
+        .expect("impact root");
+    let uri = workspace_uri(&root, "valid-contracts.mncs");
+    let text = fs::read_to_string(root.join("valid-contracts.mncs")).expect("read");
+    let map = mncs_service_core::PositionMap::new(&text);
+    let offset = text.find("fn caller").expect("needle") + "fn ".len();
+    let position = map.position_of(&text, offset);
+    let described = service
+        .describe_position(&uri, position.line, position.character)
+        .expect("describe");
+    let identity = described
+        .subject
+        .expect("subject")
+        .summary
+        .identity
+        .expect("identity");
+
+    let impact = service
+        .semantic_impact(&uri, &identity)
+        .expect("semantic impact");
+    assert_eq!(
+        impact.schema_version,
+        mncs_service_core::SEMANTIC_IMPACT_SCHEMA_VERSION
+    );
+    assert_eq!(impact.status, ResponseStatus::Answered, "{impact:#?}");
+    assert_eq!(impact.subject_identity, identity);
+    assert!(impact.snapshot.expect("snapshot").current);
+    let neighborhood = impact.impact.expect("neighborhood");
+    assert!(
+        neighborhood
+            .nodes
+            .iter()
+            .any(|node| node.identity.0 == identity),
+        "neighborhood is rooted at the subject"
+    );
+    assert!(
+        !impact.dependencies.outgoing.is_empty() || !impact.dependents.incoming.is_empty(),
+        "caller participates in call edges"
+    );
+    for obligation in &impact.affected_obligations {
+        assert!(
+            obligation.subject == identity
+                || neighborhood
+                    .nodes
+                    .iter()
+                    .any(|node| node.identity.0 == obligation.subject
+                        || node.identity.0 == obligation.identity),
+            "affected obligations fall inside the neighborhood"
+        );
+    }
+}
+
+#[test]
 fn ambient_queries_serve_over_the_resident_socket() {
     let root = temp_workspace("socket");
     seed_workspace(&root, &["valid-contracts.mncs", "syntax-error.mncs"]);

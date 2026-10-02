@@ -19,9 +19,9 @@ use crate::{
     InlayHintsResponse, LanguageCapabilitiesResponse, LanguageService, NativeKindCountResponse,
     NativeObligationsResponse, PositionQueryResponse, PrepareCallHierarchyResponse,
     RangeFormattingResponse, ReferencesResponse, RenameResponse, SelectionRangesResponse,
-    SemanticCapsuleResponse, SemanticTokensResponse, ServiceError, ServiceStatusResponse,
-    SignatureHelpResponse, TextChange, WorkspaceEventCursor, WorkspaceStatusResponse,
-    WorkspaceSymbolsResponse,
+    SemanticCapsuleResponse, SemanticImpactResponse, SemanticTokensResponse, ServiceError,
+    ServiceStatusResponse, SignatureHelpResponse, TextChange, WorkspaceEventCursor,
+    WorkspaceStatusResponse, WorkspaceSymbolsResponse,
 };
 
 /// Shared service surface consumed by local protocol adapters and remote
@@ -111,6 +111,11 @@ pub trait LanguageServiceClient: Send + Sync {
     fn workspace_symbols(&self, query: &str) -> Result<WorkspaceSymbolsResponse, ServiceError>;
     fn dependencies(&self, uri: &str, identity: &str) -> Result<GraphResponse, ServiceError>;
     fn dependents(&self, uri: &str, identity: &str) -> Result<GraphResponse, ServiceError>;
+    fn semantic_impact(
+        &self,
+        uri: &str,
+        identity: &str,
+    ) -> Result<SemanticImpactResponse, ServiceError>;
     fn obligations(
         &self,
         uri: &str,
@@ -383,6 +388,13 @@ impl LanguageServiceClient for LanguageService {
     }
     fn dependents(&self, uri: &str, identity: &str) -> Result<GraphResponse, ServiceError> {
         LanguageService::dependents(self, uri, identity)
+    }
+    fn semantic_impact(
+        &self,
+        uri: &str,
+        identity: &str,
+    ) -> Result<SemanticImpactResponse, ServiceError> {
+        LanguageService::semantic_impact(self, uri, identity)
     }
     fn obligations(
         &self,
@@ -869,6 +881,18 @@ impl LanguageServiceClient for RemoteLanguageService {
             GraphResponse
         )
     }
+    fn semantic_impact(
+        &self,
+        uri: &str,
+        identity: &str,
+    ) -> Result<SemanticImpactResponse, ServiceError> {
+        remote_call!(
+            self,
+            "semantic_impact",
+            json!({"uri": uri, "identity": identity}),
+            SemanticImpactResponse
+        )
+    }
     fn obligations(
         &self,
         uri: &str,
@@ -1329,6 +1353,9 @@ fn dispatch(service: &LanguageService, method: &str, params: Value) -> Result<Va
         }
         "dependents" => {
             value(service.dependents(&text(&params, "uri")?, &text(&params, "identity")?))
+        }
+        "semantic_impact" => {
+            value(service.semantic_impact(&text(&params, "uri")?, &text(&params, "identity")?))
         }
         "obligations" => value(service.obligations(
             &text(&params, "uri")?,
