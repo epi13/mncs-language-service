@@ -421,11 +421,59 @@ pub(crate) fn compute_completion(
         }
     }
 
+    // On a `use` line, complete module paths from the discovered stdlib
+    // manifest instead of document symbols. This precedes member-context
+    // detection: the dots in a module path are separators, not member
+    // access.
+    if let Some(module_prefix) = use_line_prefix(text, line, character) {
+        return module_completions(&module_prefix);
+    }
+
     if member_context {
         return member_completions(uri, snapshot, cursor_index, &significant);
     }
 
     scoped_candidates(uri, snapshot, byte, &prefix, !prefix.is_empty())
+}
+
+/// The partially typed module path when the cursor sits on a `use` line
+/// after the `use` keyword, else `None`.
+fn use_line_prefix(text: &str, line: u32, character: u32) -> Option<String> {
+    let line_text = text.lines().nth(line as usize)?;
+    let trimmed = line_text.trim_start();
+    if !trimmed.starts_with("use ") {
+        return None;
+    }
+    let indent = line_text.len() - trimmed.len();
+    let cursor = character as usize;
+    if cursor <= indent + 4 {
+        return Some(String::new());
+    }
+    let after_use = &line_text[indent + 4..cursor.min(line_text.len())];
+    if after_use.contains(';') {
+        return None;
+    }
+    Some(
+        after_use
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '.' || *c == '_')
+            .collect(),
+    )
+}
+
+/// Module-path candidates from the discovered stdlib manifest,
+/// prefix-filtered. Best-effort: no manifest, no candidates.
+fn module_completions(prefix: &str) -> Vec<CompletionCandidate> {
+    crate::modules::stdlib_manifest_modules()
+        .into_iter()
+        .filter(|(name, _)| name.starts_with(prefix))
+        .map(|(name, min)| CompletionCandidate {
+            label: name,
+            class: CompletionClass::Module,
+            detail: Some(format!("stdlib (profile {min}+)")),
+        })
+        .collect()
 }
 
 fn member_completions(

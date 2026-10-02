@@ -416,7 +416,10 @@ pub fn query(
                 .to_owned(),
         );
     }
-    negative_knowledge.extend(negative_knowledge_from_manifest(local_repository.as_ref(), max_items));
+    negative_knowledge.extend(negative_knowledge_from_manifest(
+        local_repository.as_ref(),
+        max_items,
+    ));
     negative_knowledge.sort_by(|left, right| left.identity.cmp(&right.identity));
     negative_knowledge.dedup_by(|left, right| left.identity == right.identity);
     let complete = local_repository
@@ -616,7 +619,11 @@ fn load_verification_context(
     workspace: Option<&Path>,
     repository: Option<&RepositoryContext>,
     max_items: usize,
-) -> (VerificationContext, Vec<NegativeKnowledge>, Option<ContextSource>) {
+) -> (
+    VerificationContext,
+    Vec<NegativeKnowledge>,
+    Option<ContextSource>,
+) {
     let unavailable = |state: &str, limitation: String| {
         (
             VerificationContext {
@@ -666,9 +673,7 @@ fn load_verification_context(
     {
         return unavailable(
             "invalid",
-            format!(
-                "verification declaration must use {OBLIGATION_INVENTORY_SCHEMA}"
-            ),
+            format!("verification declaration must use {OBLIGATION_INVENTORY_SCHEMA}"),
         );
     }
     let Some(relative) = declaration
@@ -681,9 +686,11 @@ fn load_verification_context(
         );
     };
     let relative_path = Path::new(relative);
-    if relative_path.is_absolute() || relative_path.components().any(|component| {
-        matches!(component, std::path::Component::ParentDir)
-    }) {
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
         return unavailable(
             "invalid",
             "verification obligation inventory path is not a safe repository-relative path"
@@ -852,7 +859,9 @@ fn load_verification_context(
     }
     let mut limitations = Vec::new();
     if truncated {
-        limitations.push("verification obligation rows are bounded by the family context limit".to_owned());
+        limitations.push(
+            "verification obligation rows are bounded by the family context limit".to_owned(),
+        );
     }
     let state = if truncated { "truncated" } else { "current" };
     (

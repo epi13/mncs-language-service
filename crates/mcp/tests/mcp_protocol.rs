@@ -16,6 +16,13 @@ fn fixtures_dir() -> PathBuf {
 }
 
 fn language_library() -> PathBuf {
+    if let Some(root) = std::env::var_os("MNCS_STDLIB_ROOT").map(PathBuf::from) {
+        return root.join("library");
+    }
+    let sibling = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-stdlib");
+    if sibling.join("stdlib-manifest.json").is_file() {
+        return sibling.join("library");
+    }
     let root = std::env::var_os("MNCS_LANGUAGE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {

@@ -1,0 +1,12 @@
+mncs 0.6;
+
+module mncs.demo.widget.v1;
+
+enum Widget { SMALL, LARGE }
+
+fn identify(value: Widget) -> (result: Widget) {
+    return match value {
+        SMALL => Widget.LARGE,
+        LARGE => Widget.SMALL,
+    };
+}

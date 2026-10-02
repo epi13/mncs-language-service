@@ -1,0 +1,14 @@
+{
+  "schema": "mncs.stdlib-manifest/1",
+  "repository": "fixture",
+  "modules": [
+    {
+      "name": "mncs.demo.widget.v1",
+      "path": "library/demo/widget.mncs",
+      "requires_profile": {
+        "min": "0.5",
+        "max": "0.18"
+      }
+    }
+  ]
+}

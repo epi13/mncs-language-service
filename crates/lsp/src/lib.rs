@@ -214,6 +214,7 @@ fn completion_item_kind(class: &CompletionClass) -> Option<CompletionItemKind> {
         CompletionClass::Symbol(CoreSymbolKind::RecordField) => CompletionItemKind::FIELD,
         CompletionClass::Symbol(_) => CompletionItemKind::TEXT,
         CompletionClass::Keyword => CompletionItemKind::KEYWORD,
+        CompletionClass::Module => CompletionItemKind::MODULE,
     })
 }
 

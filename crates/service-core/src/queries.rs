@@ -403,6 +403,9 @@ pub enum CompletionClass {
     Variable,
     BuiltinType,
     Keyword,
+    /// A module path on a `use` line, sourced from the discovered stdlib
+    /// manifest rather than the document snapshot.
+    Module,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

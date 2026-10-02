@@ -1,0 +1,10 @@
+{
+  "schema_version": "mncs.workspace-checkpoint/1",
+  "workspace_root": "/home/epi13/Documents/Projects/mncs-language-service/crates/service-core/../../tests/fixtures",
+  "stream_identity": "mnls-stream-4155152-1790905231390021478",
+  "last_generation": 1,
+  "last_cursor": 1,
+  "documents": {
+    "file:///home/epi13/Documents/Projects/mncs-language-service/tests/fixtures/bounded-iteration.mncs": "mncs:source:artifact:e1cb0a137a54c438e00aa5bc536a4d9feb21017eba5403318f14194d053afd7c"
+  }
+}
