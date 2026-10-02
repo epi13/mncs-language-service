@@ -226,7 +226,7 @@ def language_toolchain() -> dict:
     }
 
 
-def rpc_call(sock: Path, method: str, params: dict, timeout: float) -> dict:
+def rpc_call_raw(sock: Path, method: str, params: dict, timeout: float):
     request = json.dumps({"id": 1, "method": method, "params": params}) + "\n"
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(timeout)
@@ -254,21 +254,38 @@ def rpc_call(sock: Path, method: str, params: dict, timeout: float) -> dict:
     if not isinstance(response, dict) or not response.get("ok"):
         detail = response.get("error") if isinstance(response, dict) else None
         raise RuntimeError(f"resident refused {method}: {detail}")
-    result = response.get("result")
+    return response.get("result")
+
+
+def rpc_call(sock: Path, method: str, params: dict, timeout: float) -> dict:
+    result = rpc_call_raw(sock, method, params, timeout)
     if not isinstance(result, dict):
         raise RuntimeError(f"resident {method} returned a malformed result")
     return result
 
 
 def probe(workspace: Path, timeout: float) -> dict:
-    """Read-only resident probe with identity verification.
+    """Resident probe with identity verification and disk convergence.
 
     Returns (state, service_status_doc_or_None, detail). The socket is
     trusted only when it reports this exact canonical workspace root.
+
+    The probe first reconciles the resident to disk truth through
+    ``refresh_workspace``: shell-made edits (outside LSP) would
+    otherwise stay invisible, and a probe reporting stale state as
+    current is a correctness bug. Refresh is idempotent and bounded
+    (quiet workspaces pay reads only; only actual changes analyze),
+    converges state rather than diverging it, and mutates no source,
+    so the probe keeps read effects. A refused refresh (a refresh is
+    already running) is tolerated; the status read still proceeds.
     """
     sock = socket_path(workspace)
     if not sock.exists():
         return ("absent", None, "no resident socket at the provider-owned path")
+    try:
+        rpc_call_raw(sock, "refresh_workspace", {}, timeout)
+    except (OSError, RuntimeError):
+        pass
     try:
         observed = rpc_call(sock, "service_status", {}, timeout)
     except (OSError, RuntimeError) as error:

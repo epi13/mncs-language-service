@@ -245,6 +245,24 @@ class ProviderLifecycleTests(unittest.TestCase):
         finally:
             run_provider("stop", "--workspace", str(workspace), env=self.env)
 
+    def test_status_converges_shell_edits_before_reporting(self) -> None:
+        workspace = self.make_workspace("records.mncs")
+        ensured = run_provider("ensure", "--workspace", str(workspace), env=self.env)
+        self.assertEqual(ensured.returncode, 0, ensured.stderr)
+        try:
+            before = stdout_json(run_provider(
+                "status", "--workspace", str(workspace), env=self.env))
+            target = workspace / "records.mncs"
+            target.write_text(target.read_text() + "\n", encoding="utf-8")
+            after = stdout_json(run_provider(
+                "status", "--workspace", str(workspace), env=self.env))
+            self.assertTrue(after["ready"], after)
+            self.assertGreater(
+                after["observed"]["generation"],
+                before["observed"]["generation"])
+        finally:
+            run_provider("stop", "--workspace", str(workspace), env=self.env)
+
     def test_query_refuses_writes_and_source_dumps(self) -> None:
         workspace = self.make_workspace("records.mncs")
         for method in ("did_open", "did_save", "configure_root", "content",
