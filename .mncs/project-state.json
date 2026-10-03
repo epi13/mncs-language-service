@@ -1,0 +1,18 @@
+{
+  "schema_version": "mncs.project-intent/1",
+  "purpose": "MNCS Language Service is the resident semantic layer for editors and agents over MNCS workspaces: one resident host compiles sources through mncs-language and serves diagnostics, navigation, and bounded semantic queries through LSP, MCP, and MNCS-native kernels.",
+  "entry": [
+    "cargo test --workspace",
+    "MNLS_WORKSPACE_ROOT=/path/to/mncs/workspace cargo run -p mncs-lsp"
+  ],
+  "milestones": [
+    {
+      "id": "mncs-language-service:projection-conformance",
+      "title": "Declared ambient projection surfaces satisfy their contract",
+      "subject_slot": "declarations",
+      "evidence": "projection-conformance",
+      "dependencies": [],
+      "blockers": []
+    }
+  ]
+}

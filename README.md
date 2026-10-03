@@ -1,5 +1,8 @@
 # MNCS Language Service
 
+<!-- MNCS:generated:begin -->
+<!-- MNCS:generated:end -->
+
 `mncs-language-service` is the resident semantic service for the MNCS language.
 
 It exposes the same authoritative MNCS language semantics to editors, coding agents, and other MNCS components through multiple protocol adapters (LSP and MCP today), while keeping language semantics owned by [`mncs-language`](https://github.com/epi13/mncs-language).
