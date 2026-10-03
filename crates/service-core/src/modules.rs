@@ -65,29 +65,26 @@ fn library_roots_from_env() -> Vec<PathBuf> {
 /// Resolves imported module names against documents known to the store:
 /// open buffers first (authoritative editor state), then disk content of
 /// registered documents, then configured standard-library roots. Names come
-/// from each document's `module` declaration.
+/// from each document's `module` declaration via the store's resident module
+/// directory (maintained eagerly at every content mutation), so constructing
+/// a resolver is O(1) instead of a workspace-wide header scan.
 pub struct StoreResolver<'a> {
     store: &'a DocumentStore,
-    /// module name -> uri, built once per analysis run.
-    index: BTreeMap<String, String>,
     library_roots: Vec<PathBuf>,
 }
 
 impl<'a> StoreResolver<'a> {
     pub fn new(store: &'a DocumentStore) -> Self {
-        let mut index = BTreeMap::new();
-        for uri in store.document_uris() {
-            if let Ok(text) = store.content(&uri) {
-                if let Some(name) = declared_module_name(&text) {
-                    index.entry(name).or_insert(uri);
-                }
-            }
-        }
         Self {
             store,
-            index,
             library_roots: library_roots_from_env(),
         }
+    }
+
+    /// Owning URI for a declared module name, if a resident document
+    /// currently declares it.
+    fn module_uri(&self, module: &str) -> Option<String> {
+        self.store.module_uri(module)
     }
 }
 
@@ -101,10 +98,10 @@ impl ModuleResolver for StoreResolver<'_> {
             && !module.ends_with('.')
             && !module.contains("..")
         {
-            if let Some(uri) = self.index.get(module) {
-                if let Ok(text) = self.store.content(uri) {
+            if let Some(uri) = self.module_uri(module) {
+                if let Ok(text) = self.store.content(&uri) {
                     let text = (*text).clone();
-                    return Some(self.store.envelope(uri, &text));
+                    return Some(self.store.envelope(&uri, &text));
                 }
             }
             for root in &self.library_roots {
@@ -139,18 +136,19 @@ pub struct DependencyFingerprints {
 impl DependencyFingerprints {
     /// Records the identity of every direct import of `text`, best-effort:
     /// unresolvable imports are absent here and surface as compiler
-    /// diagnostics instead.
+    /// diagnostics instead. Resident identities come from the store's seal
+    /// cache (no re-hashing); only library-root files are sealed on demand.
     pub fn collect(store: &DocumentStore, text: &str) -> Self {
         let resolver = StoreResolver::new(store);
         let mut modules = BTreeMap::new();
-        for line in text.lines().map(str::trim_start) {
-            let Some(rest) = line.strip_prefix("use ") else {
-                continue;
-            };
-            let Some(name) = rest.trim_end().strip_suffix(';') else {
-                continue;
-            };
-            let name = name.trim();
+        for name in use_names(text) {
+            // Fast path: resident documents expose sealed identities.
+            if let Some(uri) = store.module_uri(name) {
+                if let Ok(identity) = store.content_identity(&uri) {
+                    modules.insert(name.to_owned(), identity);
+                    continue;
+                }
+            }
             if let Some(envelope) = resolver.resolve(name) {
                 modules.insert(name.to_owned(), envelope.identity);
             }
@@ -158,7 +156,93 @@ impl DependencyFingerprints {
         Self { modules }
     }
 
+    /// Records the exact source identities the compiler consumed for `text`'s
+    /// direct imports, from the authoritative `module_resolutions` provenance.
+    /// Names the compiler did not record (failed elaboration, unresolvable
+    /// imports) fall back to current resolution, exactly as [`Self::collect`]
+    /// would observe them. Recording what was *consumed* (rather than what
+    /// is current after analysis) keeps the staleness check sound when a
+    /// dependency edits while analysis is in flight.
+    pub fn from_consumed(
+        store: &DocumentStore,
+        text: &str,
+        consumed: &[mncs_compiler::ModuleResolution],
+    ) -> Self {
+        let resolver = StoreResolver::new(store);
+        let mut modules = BTreeMap::new();
+        for name in use_names(text) {
+            if let Some(record) = consumed
+                .iter()
+                .find(|record| record.requested_module == name)
+            {
+                modules.insert(name.to_owned(), record.source_identity.clone());
+                continue;
+            }
+            if let Some(uri) = store.module_uri(name) {
+                if let Ok(identity) = store.content_identity(&uri) {
+                    modules.insert(name.to_owned(), identity);
+                    continue;
+                }
+            }
+            if let Some(envelope) = resolver.resolve(name) {
+                modules.insert(name.to_owned(), envelope.identity);
+            }
+        }
+        Self { modules }
+    }
+
+    /// Direct dependency edges with owning URIs for the workspace dependency
+    /// graph: `(requested module, owner URI, consumed source identity)`.
+    /// Library-root dependencies carry a `file://` URI outside the workspace.
+    pub fn edges(
+        store: &DocumentStore,
+        text: &str,
+        consumed: &[mncs_compiler::ModuleResolution],
+    ) -> Vec<(String, String, String)> {
+        let mut edges = Vec::new();
+        for name in use_names(text) {
+            let identity = consumed
+                .iter()
+                .find(|record| record.requested_module == name)
+                .map(|record| record.source_identity.clone());
+            if let Some(uri) = store.module_uri(name) {
+                let identity = identity.or_else(|| store.content_identity(&uri).ok());
+                if let Some(identity) = identity {
+                    edges.push((name.to_owned(), uri, identity));
+                }
+                continue;
+            }
+            // Non-resident (library-root) dependency: resolve for its URI.
+            let resolver = StoreResolver::new(store);
+            if let Some(envelope) = resolver.resolve(name) {
+                let identity = identity.unwrap_or(envelope.identity);
+                edges.push((name.to_owned(), envelope.logical_name, identity));
+            }
+        }
+        edges.sort();
+        edges.dedup();
+        edges
+    }
+
     pub fn is_empty(&self) -> bool {
         self.modules.is_empty()
     }
+}
+
+/// Declared `use` target names in source order (duplicates removed).
+fn use_names(text: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    for line in text.lines().map(str::trim_start) {
+        let Some(rest) = line.strip_prefix("use ") else {
+            continue;
+        };
+        let Some(name) = rest.trim_end().strip_suffix(';') else {
+            continue;
+        };
+        let name = name.trim();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }

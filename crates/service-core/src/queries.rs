@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use mncs_model::{ObligationStatus, SemanticId};
@@ -265,6 +266,54 @@ pub struct GraphEdgeTarget {
     pub identity: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+/// Upper bound on transitive-walk depth accepted from callers.
+pub const MAX_TRANSITIVE_DEPTH: usize = 16;
+/// Upper bound on transitive-walk nodes returned in one response.
+pub const MAX_TRANSITIVE_NODES: usize = 1024;
+
+/// One module reached by a transitive module-dependency walk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitiveDepNode {
+    pub uri: String,
+    pub module: String,
+    /// Edge count from the walk subject (direct neighbors are depth 1).
+    pub depth: usize,
+    /// Requested module name on the traversed import edge, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via_module: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitiveDepsResponse {
+    pub status: ResponseStatus,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<TransitiveDepNode>,
+    /// False when the walk was truncated by depth or node bounds.
+    pub complete: bool,
+}
+
+/// One function reached by a transitive caller walk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitiveCallerNode {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    pub uri: String,
+    pub name: String,
+    /// Call-edge count from the walk subject (direct callers are depth 1).
+    pub depth: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitiveCallersResponse {
+    pub status: ResponseStatus,
+    pub subject_identity: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<TransitiveCallerNode>,
+    /// False when the walk was truncated by depth or node bounds.
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -544,10 +593,20 @@ fn load_workspace_checkpoint(
 pub struct LanguageService {
     pub(crate) store: DocumentStore,
     pub(crate) events: Arc<crate::events::EventHub>,
-    analyses: RwLock<BTreeMap<String, AnalysisSlot>>,
+    analyses: Arc<RwLock<BTreeMap<String, AnalysisSlot>>>,
     /// Serializes concurrent analysis of the same document without holding
     /// global locks during expensive frontend work.
     analyze_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    /// Resident workspace indexes (identity/declaration/reference/dependency)
+    /// published alongside snapshots. Lock order is analyses -> index ->
+    /// store; the per-document analyze mutex stays outermost.
+    pub(crate) workspace_index: Arc<RwLock<crate::workspace_index::WorkspaceIndex>>,
+    pub(crate) stats: crate::workspace_index::ServiceStats,
+    /// Store content version covered by the last fully successful
+    /// workspace-wide ensure. Entries without external dependencies are
+    /// provably current while this matches, so warm cross-document queries
+    /// skip per-document validation entirely.
+    last_ensured_version: AtomicU64,
     pub(crate) native_kernel: RwLock<Option<Arc<crate::native_query::NativeQueryKernel>>>,
     pub(crate) filter_kernel: RwLock<Option<Arc<crate::native_filter::NativeFilterKernel>>>,
     pub(crate) capsule_kernel: RwLock<Option<Arc<crate::ambient::CapsuleKernel>>>,
@@ -563,11 +622,30 @@ impl Default for LanguageService {
 
 impl LanguageService {
     pub fn new(root: Option<std::path::PathBuf>) -> Self {
+        let analyses = Arc::new(RwLock::new(BTreeMap::new()));
+        let workspace_index = Arc::new(RwLock::new(
+            crate::workspace_index::WorkspaceIndex::default(),
+        ));
+        let store = DocumentStore::new(root);
+        // Every committed content change invalidates the changed document
+        // plus its transitive importers: analyses embed their dependencies'
+        // content at elaboration time, so anything downstream must
+        // re-analyze on next access. Unaffected documents keep their state.
+        store.set_change_callback({
+            let analyses = Arc::clone(&analyses);
+            let workspace_index = Arc::clone(&workspace_index);
+            Arc::new(move |uri: &str| {
+                invalidate_transitive_importers(&analyses, &workspace_index, uri);
+            })
+        });
         Self {
-            store: DocumentStore::new(root),
+            store,
             events: Arc::new(crate::events::EventHub::default()),
-            analyses: RwLock::new(BTreeMap::new()),
+            analyses,
             analyze_locks: Mutex::new(BTreeMap::new()),
+            workspace_index,
+            stats: crate::workspace_index::ServiceStats::default(),
+            last_ensured_version: AtomicU64::new(u64::MAX),
             native_kernel: RwLock::new(None),
             filter_kernel: RwLock::new(None),
             capsule_kernel: RwLock::new(None),
@@ -913,10 +991,26 @@ impl LanguageService {
     }
 
     /// Current fingerprint of a document's exact content: the authoritative
-    /// `SourceEnvelope` identity for that content.
+    /// `SourceEnvelope` identity for that content, sealed when the content
+    /// was stored (no re-hashing on warm queries).
     pub fn content_fingerprint(&self, uri: &str) -> Result<String, ServiceError> {
-        let text = self.store.content(uri)?;
-        Ok(self.store.envelope(uri, &text).identity)
+        self.store.content_identity(uri)
+    }
+
+    /// Machine-readable query-execution counters for tests, Debug, and
+    /// Doctor visibility into resident-state behavior.
+    pub fn service_stats(&self) -> crate::workspace_index::ServiceStatsSnapshot {
+        let mut snapshot = self.stats.snapshot();
+        if let Ok(index) = self.workspace_index.read() {
+            snapshot.indexed_documents = index.len();
+            snapshot.indexed_occurrences = index.occurrence_count();
+        }
+        snapshot
+    }
+
+    /// Reset query-execution counters (index contents are untouched).
+    pub fn reset_service_stats(&self) {
+        self.stats.reset();
     }
 
     /// Exact resident content for adapters that need to materialize a
@@ -936,6 +1030,7 @@ impl LanguageService {
         let fingerprint = self.content_fingerprint(uri)?;
 
         if let Some(existing) = self.cached_snapshot(uri, &fingerprint) {
+            self.stats.record_snapshot_hit();
             return Ok(existing);
         }
 
@@ -953,19 +1048,20 @@ impl LanguageService {
         // Re-check after acquiring: another thread may have published.
         let fingerprint = self.content_fingerprint(uri)?;
         if let Some(existing) = self.cached_snapshot(uri, &fingerprint) {
+            self.stats.record_snapshot_hit();
             return Ok(existing);
         }
 
         let text = self.store.content(uri)?;
         let envelope = self.store.envelope(uri, &text);
         let generation = self.store.generation();
-        let dependencies = crate::modules::DependencyFingerprints::collect(&self.store, &text);
         let resolver = crate::modules::StoreResolver::new(&self.store);
+        self.stats.record_frontend_run();
         let analysis = Arc::new(DocumentAnalysis::analyze_with_resolver(
             uri,
             envelope,
             generation,
-            dependencies,
+            &self.store,
             &resolver,
         ));
 
@@ -979,8 +1075,95 @@ impl LanguageService {
                     snapshot: Arc::clone(&analysis),
                 },
             );
+            drop(analyses);
+            // The workspace index entry is derived from the published
+            // snapshot, so indexed queries observe exactly what per-document
+            // snapshot storms would find.
+            self.publish_workspace_entry(uri, &analysis);
         }
+        self.stats.record_snapshot_miss();
         Ok(analysis)
+    }
+
+    /// Publish (or refresh) the workspace index entry for a resident
+    /// snapshot. Entries for other documents are untouched.
+    pub(crate) fn publish_workspace_entry(&self, uri: &str, snapshot: &Arc<DocumentAnalysis>) {
+        let entry =
+            crate::workspace_index::WorkspaceEntry::build(&self.store, uri, snapshot, summarize);
+        if let Ok(mut index) = self.workspace_index.write() {
+            index.publish(uri.to_owned(), entry);
+            self.stats.record_index_publish();
+        }
+    }
+
+    /// Ensure the workspace index entry for `uri` is current, repairing it
+    /// through the ordinary snapshot funnel when stale or missing. Returns
+    /// whether a usable entry is resident afterwards.
+    pub(crate) fn ensure_workspace_entry(&self, uri: &str) -> bool {
+        let needs_repair = match self.workspace_index.read() {
+            Ok(index) => match index.entry(uri) {
+                Some(entry) => !entry.is_current(&self.store, uri),
+                None => true,
+            },
+            Err(_) => true,
+        };
+        if !needs_repair {
+            self.stats.record_index_query();
+            return true;
+        }
+        self.stats.record_index_repair();
+        match self.snapshot(uri) {
+            Ok(_) => self.workspace_index.read().ok().is_some_and(|index| {
+                index
+                    .entry(uri)
+                    .is_some_and(|entry| entry.is_current(&self.store, uri))
+            }),
+            Err(_) => {
+                if let Ok(mut index) = self.workspace_index.write() {
+                    index.remove(uri);
+                }
+                false
+            }
+        }
+    }
+
+    /// Ensure entries for every known document. Returns URIs that could not
+    /// be ensured (unknown or unreachable documents), in URI order.
+    pub(crate) fn ensure_workspace_entries(&self) -> Vec<String> {
+        // Fast path: nothing in the store changed since the last fully
+        // successful ensure, so every entry without external dependencies
+        // is still current. External-file importers always re-validate
+        // because library files change without store mutations.
+        let version = self.store.content_version();
+        if self.last_ensured_version.load(Ordering::Relaxed) == version {
+            let external = self
+                .workspace_index
+                .read()
+                .ok()
+                .map(|index| index.external_dep_uris())
+                .unwrap_or_default();
+            let mut failed = Vec::new();
+            for uri in external {
+                if !self.ensure_workspace_entry(&uri) {
+                    failed.push(uri);
+                }
+            }
+            return failed;
+        }
+        let mut uris = self.store.document_uris();
+        uris.sort();
+        let mut failed = Vec::new();
+        for uri in uris {
+            if !self.ensure_workspace_entry(&uri) {
+                failed.push(uri);
+            }
+        }
+        // Record only when no store mutation interleaved: a mid-ensure edit
+        // may have invalidated entries validated before it landed.
+        if failed.is_empty() && self.store.content_version() == version {
+            self.last_ensured_version.store(version, Ordering::Relaxed);
+        }
+        failed
     }
 
     fn cached_snapshot(&self, uri: &str, fingerprint: &str) -> Option<Arc<DocumentAnalysis>> {
@@ -1006,35 +1189,50 @@ impl LanguageService {
     }
 
     /// Evict cached analyses whose fingerprints no longer match; called after
-    /// document mutations to bound memory.
+    /// document mutations to bound memory. Workspace index entries for
+    /// evicted documents are dropped with them.
     pub fn evict_stale_analyses(&self) -> usize {
-        let mut removed = 0;
-        let Ok(analyses) = self.analyses.write() else {
-            return 0;
-        };
-        let mut keep = BTreeMap::new();
-        for (uri, slot) in analyses.iter() {
-            match self.store.content(uri) {
-                Ok(text) => {
-                    if self.store.envelope(uri, &text).identity == slot.snapshot.source_identity {
-                        keep.insert(
-                            uri.clone(),
-                            AnalysisSlot {
-                                snapshot: Arc::clone(&slot.snapshot),
-                            },
-                        );
+        let stale: Vec<String> = {
+            let Ok(analyses) = self.analyses.read() else {
+                return 0;
+            };
+            analyses
+                .iter()
+                .filter_map(|(uri, slot)| {
+                    let current = self.store.content_identity(uri).ok();
+                    if current.as_deref() == Some(slot.snapshot.source_identity.as_str()) {
+                        None
                     } else {
-                        removed += 1;
+                        Some(uri.clone())
                     }
-                }
-                Err(_) => {
+                })
+                .collect()
+        };
+        if stale.is_empty() {
+            return 0;
+        }
+        // Re-validate under the write lock so a snapshot published after the
+        // scan is never evicted.
+        let mut removed = 0;
+        let mut evicted = Vec::new();
+        if let Ok(mut analyses) = self.analyses.write() {
+            for uri in &stale {
+                let still_stale = analyses.get(uri).is_some_and(|slot| {
+                    self.store.content_identity(uri).ok().as_deref()
+                        != Some(slot.snapshot.source_identity.as_str())
+                });
+                if still_stale && analyses.remove(uri).is_some() {
                     removed += 1;
+                    evicted.push(uri.clone());
                 }
             }
         }
-        drop(analyses);
-        if let Ok(mut writable) = self.analyses.write() {
-            *writable = keep;
+        if !evicted.is_empty() {
+            if let Ok(mut index) = self.workspace_index.write() {
+                for uri in evicted {
+                    index.remove(&uri);
+                }
+            }
         }
         removed
     }
@@ -1479,24 +1677,29 @@ impl LanguageService {
         name: &str,
         identity: Option<&str>,
     ) -> Vec<SymbolSummary> {
-        let mut matches = Vec::new();
-        for candidate_uri in self.store.document_uris() {
-            let Ok(candidate) = self.snapshot(&candidate_uri) else {
-                continue;
-            };
-            for (index, entry) in candidate.symbols.symbols.iter().enumerate() {
-                if entry.name != name
-                    || entry.kind != kind
-                    || entry.name_span != declaration
-                    || identity.is_some_and(|wanted| {
-                        entry.identity.as_ref().map(|value| value.0.as_str()) != Some(wanted)
-                    })
-                {
-                    continue;
+        let _ = self.ensure_workspace_entries();
+        let key = crate::workspace_index::DeclarationKey {
+            start: declaration.start,
+            end: declaration.end,
+            line: declaration.line,
+            column: declaration.column,
+            kind,
+            name: name.to_owned(),
+        };
+        let Ok(index) = self.workspace_index.read() else {
+            return Vec::new();
+        };
+        let mut matches: Vec<SymbolSummary> = index
+            .lookup_declarations(&key)
+            .into_iter()
+            .filter_map(|(uri, symbol)| {
+                let summary = index.entry(&uri)?.symbols.get(symbol)?.clone();
+                if identity.is_some_and(|wanted| summary.identity.as_deref() != Some(wanted)) {
+                    return None;
                 }
-                matches.push(summarize(&candidate_uri, &candidate, index));
-            }
-        }
+                Some(summary)
+            })
+            .collect();
         matches.sort_by(|left, right| left.uri.cmp(&right.uri));
         matches.dedup();
         matches
@@ -1579,38 +1782,31 @@ impl LanguageService {
             }
         }
         let name = target_name;
-        for occurrence_uri in self.store.document_uris() {
-            let Ok(occurrence_snapshot) = self.snapshot(&occurrence_uri) else {
-                continue;
-            };
-            for occurrence in &occurrence_snapshot.front_end.name_resolutions.resolutions {
-                if occurrence.declaration != declaration_span
-                    || indexes::SymbolKind::from_resolved(occurrence.kind) != kind
-                {
-                    continue;
-                }
-                let Some(occurrence_name) = occurrence_snapshot
-                    .text()
-                    .get(occurrence.occurrence.start..occurrence.occurrence.end)
-                else {
-                    continue;
-                };
-                if occurrence_name != name {
-                    continue;
-                }
-                let range = occurrence_snapshot
-                    .positions
-                    .range_of(occurrence_snapshot.text(), occurrence.occurrence);
-                hits.push(ReferenceHit {
-                    uri: occurrence_uri.clone(),
-                    is_declaration: false,
-                    range,
-                    name_range: range,
-                    kind,
-                    name: name.clone(),
-                    container: None,
-                });
-            }
+        let _ = self.ensure_workspace_entries();
+        let key = crate::workspace_index::OccurrenceKey {
+            decl_start: declaration_span.start,
+            decl_end: declaration_span.end,
+            decl_line: declaration_span.line,
+            decl_column: declaration_span.column,
+            kind,
+            name: Some(name.clone()),
+        };
+        let occurrences = self
+            .workspace_index
+            .read()
+            .ok()
+            .map(|index| index.lookup_occurrences(&key))
+            .unwrap_or_default();
+        for occurrence in occurrences {
+            hits.push(ReferenceHit {
+                uri: occurrence.uri,
+                is_declaration: false,
+                range: occurrence.range,
+                name_range: occurrence.range,
+                kind,
+                name: name.clone(),
+                container: None,
+            });
         }
         hits.sort_by(|left, right| {
             left.uri
@@ -1658,20 +1854,16 @@ impl LanguageService {
 
     pub fn workspace_symbols(&self, query: &str) -> WorkspaceSymbolsResponse {
         let needle = query.to_lowercase();
+        let _ = self.ensure_workspace_entries();
         let mut hits = Vec::new();
-        for uri in self.store.document_uris() {
-            let Ok(snapshot) = self.snapshot(&uri) else {
-                continue;
-            };
-            for index in 0..snapshot.symbols.symbols.len() {
-                let entry = &snapshot.symbols.symbols[index];
-                if !needle.is_empty() && !entry.name.to_lowercase().contains(&needle) {
-                    continue;
+        if let Ok(index) = self.workspace_index.read() {
+            for (uri, entry) in index.entries() {
+                for symbol in entry.symbols_matching(&needle) {
+                    hits.push(WorkspaceSymbolHit {
+                        uri: (*uri).clone(),
+                        summary: entry.symbols[symbol].clone(),
+                    });
                 }
-                hits.push(WorkspaceSymbolHit {
-                    uri: uri.clone(),
-                    summary: summarize(&uri, &snapshot, index),
-                });
             }
         }
         hits.sort_by(|left, right| {
@@ -1940,6 +2132,243 @@ impl LanguageService {
 
     pub fn dependents(&self, uri: &str, identity: &str) -> Result<GraphResponse, ServiceError> {
         self.graph_query(uri, identity, false)
+    }
+
+    /// Modules that transitively import `uri`'s module, breadth-first over
+    /// the resident reverse-dependency index. The subject itself is excluded;
+    /// direct importers are depth 1.
+    pub fn transitive_dependents(
+        &self,
+        uri: &str,
+        max_depth: usize,
+    ) -> Result<TransitiveDepsResponse, ServiceError> {
+        let max_depth = max_depth.clamp(1, MAX_TRANSITIVE_DEPTH);
+        // Validates that the subject is a readable document.
+        let _ = self.snapshot(uri)?;
+        let _ = self.ensure_workspace_entries();
+        let index = self.workspace_index.read().map_err(poisoned)?;
+        let mut visited: BTreeSet<String> = BTreeSet::from([uri.to_owned()]);
+        let mut frontier = vec![uri.to_owned()];
+        let mut nodes = Vec::new();
+        let mut complete = true;
+        for depth in 1..=max_depth {
+            let mut next = Vec::new();
+            for current in &frontier {
+                for importer in index.importers_of(current) {
+                    // Skip edges orphaned by a module move: the recorded
+                    // module must still resolve to the walked URI.
+                    let edge = index.entry(&importer).and_then(|entry| {
+                        entry.deps.iter().find(|edge| {
+                            &edge.uri == current
+                                && self.store.module_uri(&edge.module).as_deref() == Some(current)
+                        })
+                    });
+                    let Some(edge) = edge else {
+                        continue;
+                    };
+                    if !visited.insert(importer.clone()) {
+                        continue;
+                    }
+                    nodes.push(TransitiveDepNode {
+                        uri: importer.clone(),
+                        module: index
+                            .entry(&importer)
+                            .map(|entry| entry.module.clone())
+                            .unwrap_or_default(),
+                        depth,
+                        via_module: Some(edge.module.clone()),
+                    });
+                    if nodes.len() >= MAX_TRANSITIVE_NODES {
+                        complete = false;
+                        break;
+                    }
+                    next.push(importer);
+                }
+                if !complete {
+                    break;
+                }
+            }
+            if !complete || next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        nodes.sort_by(|left, right| (left.depth, &left.uri).cmp(&(right.depth, &right.uri)));
+        Ok(TransitiveDepsResponse {
+            status: ResponseStatus::Answered,
+            generation: self.store.generation(),
+            nodes,
+            complete,
+        })
+    }
+
+    /// Modules that `uri`'s module transitively imports, breadth-first over
+    /// the resident dependency edges. The subject itself is excluded even
+    /// when an import cycle leads back to it; direct dependencies are
+    /// depth 1.
+    pub fn transitive_dependencies(
+        &self,
+        uri: &str,
+        max_depth: usize,
+    ) -> Result<TransitiveDepsResponse, ServiceError> {
+        let max_depth = max_depth.clamp(1, MAX_TRANSITIVE_DEPTH);
+        let _ = self.snapshot(uri)?;
+        let _ = self.ensure_workspace_entries();
+        let index = self.workspace_index.read().map_err(poisoned)?;
+        let mut visited: BTreeSet<String> = BTreeSet::from([uri.to_owned()]);
+        let mut frontier = vec![uri.to_owned()];
+        let mut nodes = Vec::new();
+        let mut complete = true;
+        for depth in 1..=max_depth {
+            let mut next = Vec::new();
+            for current in &frontier {
+                let Some(entry) = index.entry(current) else {
+                    continue;
+                };
+                for edge in &entry.deps {
+                    // Follow live resolution so a moved module is reported
+                    // at its current owner. External files have no live
+                    // resolution and keep their recorded URI.
+                    let target = if self.store.knows(&edge.uri) {
+                        self.store
+                            .module_uri(&edge.module)
+                            .unwrap_or_else(|| edge.uri.clone())
+                    } else {
+                        edge.uri.clone()
+                    };
+                    if !visited.insert(target.clone()) {
+                        continue;
+                    }
+                    nodes.push(TransitiveDepNode {
+                        uri: target.clone(),
+                        module: index
+                            .entry(&target)
+                            .map(|entry| entry.module.clone())
+                            .filter(|module| !module.is_empty())
+                            .unwrap_or_else(|| edge.module.clone()),
+                        depth,
+                        via_module: Some(edge.module.clone()),
+                    });
+                    if nodes.len() >= MAX_TRANSITIVE_NODES {
+                        complete = false;
+                        break;
+                    }
+                    next.push(target);
+                }
+                if !complete {
+                    break;
+                }
+            }
+            if !complete || next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        nodes.sort_by(|left, right| (left.depth, &left.uri).cmp(&(right.depth, &right.uri)));
+        Ok(TransitiveDepsResponse {
+            status: ResponseStatus::Answered,
+            generation: self.store.generation(),
+            nodes,
+            complete,
+        })
+    }
+
+    /// Functions that transitively call `identity`, breadth-first over the
+    /// resident reference index. Call sites come from the compiler's
+    /// authoritative name resolutions (the same join as `incoming_calls`),
+    /// so this crosses module boundaries without text search. Direct
+    /// callers are depth 1.
+    pub fn transitive_callers(
+        &self,
+        identity: &str,
+        max_depth: usize,
+    ) -> Result<TransitiveCallersResponse, ServiceError> {
+        let max_depth = max_depth.clamp(1, MAX_TRANSITIVE_DEPTH);
+        let _ = self.ensure_workspace_entries();
+        let index = self.workspace_index.read().map_err(poisoned)?;
+        let Some((root_uri, root_idx)) = index.lookup_identity(identity) else {
+            return Ok(TransitiveCallersResponse {
+                status: ResponseStatus::Unresolved {
+                    reason: format!("identity {identity} names no workspace symbol"),
+                },
+                subject_identity: identity.to_owned(),
+                nodes: Vec::new(),
+                complete: true,
+            });
+        };
+        let root_kind = index
+            .entry(&root_uri)
+            .and_then(|entry| entry.symbols.get(root_idx))
+            .map(|summary| summary.kind);
+        if root_kind != Some(SymbolKind::Function) {
+            return Ok(TransitiveCallersResponse {
+                status: ResponseStatus::Unresolved {
+                    reason: "only functions participate in the call hierarchy".to_owned(),
+                },
+                subject_identity: identity.to_owned(),
+                nodes: Vec::new(),
+                complete: true,
+            });
+        }
+        // Expand by (uri, symbol) so callers without a recorded identity
+        // still contribute their own callers to deeper levels.
+        let root = (root_uri, root_idx);
+        let mut visited: BTreeSet<(String, usize)> = BTreeSet::from([root.clone()]);
+        let mut expand = vec![root];
+        let mut nodes = Vec::new();
+        let mut complete = true;
+        for depth in 1..=max_depth {
+            let mut next = Vec::new();
+            for (uri, idx) in &expand {
+                let Some(entry) = index.entry(uri) else {
+                    continue;
+                };
+                let Some(span) = entry.spans.get(*idx).copied() else {
+                    continue;
+                };
+                for occurrence in index.occurrences_for_declaration(span, SymbolKind::Function) {
+                    let Some(caller) = occurrence.enclosing_function else {
+                        continue;
+                    };
+                    let key = (occurrence.uri.clone(), caller);
+                    if !visited.insert(key.clone()) {
+                        continue;
+                    }
+                    let summary = index
+                        .entry(&occurrence.uri)
+                        .and_then(|entry| entry.symbols.get(caller));
+                    nodes.push(TransitiveCallerNode {
+                        identity: summary.and_then(|summary| summary.identity.clone()),
+                        uri: occurrence.uri.clone(),
+                        name: summary
+                            .map(|summary| summary.name.clone())
+                            .unwrap_or_default(),
+                        depth,
+                    });
+                    if nodes.len() >= MAX_TRANSITIVE_NODES {
+                        complete = false;
+                        break;
+                    }
+                    next.push(key);
+                }
+                if !complete {
+                    break;
+                }
+            }
+            if !complete || next.is_empty() {
+                break;
+            }
+            expand = next;
+        }
+        nodes.sort_by(|left, right| {
+            (left.depth, &left.uri, &left.name).cmp(&(right.depth, &right.uri, &right.name))
+        });
+        Ok(TransitiveCallersResponse {
+            status: ResponseStatus::Answered,
+            subject_identity: identity.to_owned(),
+            nodes,
+            complete,
+        })
     }
 
     pub(crate) fn graph_query(
@@ -2484,6 +2913,47 @@ pub(crate) fn function_call_edges(program: &mncs_model::Program) -> Vec<(Semanti
 fn poisoned<T>(_: T) -> ServiceError {
     ServiceError::InvalidRequest {
         reason: "internal lock poisoned".to_owned(),
+    }
+}
+
+/// Drop cached snapshots and index entries for `changed` and all of its
+/// transitive importers. Invoked from the store's change callback on the
+/// mutating thread with no store guards held; locks are taken sequentially
+/// (never nested) so this cannot deadlock against query paths.
+fn invalidate_transitive_importers(
+    analyses: &RwLock<BTreeMap<String, AnalysisSlot>>,
+    workspace_index: &RwLock<crate::workspace_index::WorkspaceIndex>,
+    changed: &str,
+) {
+    let victims: Vec<String> = {
+        let Ok(index) = workspace_index.read() else {
+            return;
+        };
+        let mut visited = BTreeSet::from([changed.to_owned()]);
+        let mut frontier = vec![changed.to_owned()];
+        let mut victims = vec![changed.to_owned()];
+        while let Some(current) = frontier.pop() {
+            for importer in index.importers_of(&current) {
+                if visited.insert(importer.clone()) {
+                    frontier.push(importer.clone());
+                    victims.push(importer);
+                }
+            }
+        }
+        victims
+    };
+    if victims.is_empty() {
+        return;
+    }
+    if let Ok(mut writable) = analyses.write() {
+        for uri in &victims {
+            writable.remove(uri);
+        }
+    }
+    if let Ok(mut writable) = workspace_index.write() {
+        for uri in &victims {
+            writable.remove(uri);
+        }
     }
 }
 

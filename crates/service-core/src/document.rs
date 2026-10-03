@@ -5,7 +5,7 @@
 //! overrides disk content. It does not interpret MNCS semantics; it only
 //! provides exact, versioned text states that the analysis layer consumes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,25 +24,48 @@ pub const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Debug, Clone)]
 struct Buffer {
     version: i32,
+    content: StoredContent,
+}
+
+/// One exact text state with its authoritative derivations sealed once, at
+/// store time. The identity is exactly `envelope(uri, text).identity`
+/// (the envelope constructor is pure over `(uri, text)`), so warm queries
+/// compare cached strings instead of re-hashing content per query.
+#[derive(Debug, Clone)]
+struct StoredContent {
     text: Arc<String>,
+    /// Authoritative `mncs:source:artifact:...` identity for this exact
+    /// `(uri, text)` pair.
+    identity: String,
+    /// Declared `module` name for this exact text, if any.
+    module: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct Document {
     path: Option<PathBuf>,
     /// Text as last read from disk. `None` for untitled buffers never saved.
-    disk: Option<Arc<String>>,
+    disk: Option<StoredContent>,
     /// Editor state overriding disk while the document is open.
     buffer: Option<Buffer>,
 }
 
 impl Document {
     fn content(&self) -> Option<Arc<String>> {
+        self.stored().map(|stored| Arc::clone(&stored.text))
+    }
+
+    fn stored(&self) -> Option<&StoredContent> {
         if let Some(buffer) = &self.buffer {
-            Some(Arc::clone(&buffer.text))
+            Some(&buffer.content)
         } else {
-            self.disk.clone()
+            self.disk.as_ref()
         }
+    }
+
+    /// Effective declared module: the winning content's sealed module.
+    fn effective_module(&self) -> Option<&str> {
+        self.stored().and_then(|stored| stored.module.as_deref())
     }
 
     fn open(&self) -> bool {
@@ -83,13 +106,44 @@ impl Generations {
 }
 
 /// Resident workspace/document state for one service instance.
-#[derive(Debug)]
 pub struct DocumentStore {
     documents: RwLock<BTreeMap<String, Document>>,
     root: RwLock<Option<PathBuf>>,
     generations: Generations,
     /// Serializes disk scans.
     discovery_lock: Mutex<()>,
+    /// Resident module directory: declared module name -> claiming URIs.
+    /// Maintained incrementally at every content mutation from the sealed
+    /// per-doc module names, so import resolution is a map lookup instead
+    /// of a workspace-wide header scan. The least URI wins, exactly as a
+    /// fresh scan over the sorted document map would produce.
+    module_claims: RwLock<BTreeMap<String, BTreeSet<String>>>,
+    /// Monotonic store mutation counter: bumped on every content change,
+    /// document registration/removal, and lazy disk load. Lets index
+    /// validation skip per-document checks when nothing could have changed.
+    content_version: AtomicU64,
+    /// Content-change observer, wired once by the owning service. Invoked
+    /// after every committed content change with no store guards held, so
+    /// the service can invalidate derived state (transitive importers)
+    /// regardless of which mutation path committed the change.
+    change_callback: std::sync::OnceLock<ChangeCallback>,
+}
+
+/// Invoked with the changed URI after a content change commits.
+pub(crate) type ChangeCallback = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
+impl std::fmt::Debug for DocumentStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DocumentStore")
+            .field("documents", &self.documents)
+            .field("root", &self.root)
+            .field("generations", &self.generations)
+            .field("module_claims", &self.module_claims)
+            .field("content_version", &self.content_version)
+            .field("change_callback", &self.change_callback.get().is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl DocumentStore {
@@ -99,7 +153,128 @@ impl DocumentStore {
             documents: RwLock::new(BTreeMap::new()),
             generations: Generations::default(),
             discovery_lock: Mutex::new(()),
+            module_claims: RwLock::new(BTreeMap::new()),
+            content_version: AtomicU64::new(0),
+            change_callback: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Wire the content-change observer. Called once by the owning service;
+    /// later calls are ignored.
+    pub(crate) fn set_change_callback(&self, callback: ChangeCallback) {
+        let _ = self.change_callback.set(callback);
+    }
+
+    fn notify_content_changed(&self, uri: &str) {
+        if let Some(callback) = self.change_callback.get() {
+            callback(uri);
+        }
+    }
+
+    /// Current store mutation counter value.
+    pub fn content_version(&self) -> u64 {
+        self.content_version.load(Ordering::Relaxed)
+    }
+
+    fn bump_content_version(&self) {
+        self.content_version.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Seal one exact text state for `uri`: authoritative envelope identity
+    /// plus declared module name, computed once here instead of per query.
+    fn seal_content(uri: &str, text: String) -> StoredContent {
+        let identity = Self::envelope_for(uri, &text).identity;
+        let module = mncs_syntax::declared_module_name(&text);
+        StoredContent {
+            text: Arc::new(text),
+            identity,
+            module,
+        }
+    }
+
+    /// Record a document's effective-module change. Callers must invoke
+    /// this while holding the documents write guard, so the claim update
+    /// commits atomically with the content change it describes. Lock order
+    /// is documents -> claims; the claims lock never nests outward.
+    fn note_module_change(&self, uri: &str, old_module: Option<&str>, new_module: Option<&str>) {
+        if old_module == new_module {
+            return;
+        }
+        let Ok(mut claims) = self.module_claims.write() else {
+            return;
+        };
+        if let Some(old) = old_module {
+            if let Some(bucket) = claims.get_mut(old) {
+                bucket.remove(uri);
+                if bucket.is_empty() {
+                    claims.remove(old);
+                }
+            }
+        }
+        if let Some(new) = new_module {
+            claims
+                .entry(new.to_owned())
+                .or_default()
+                .insert(uri.to_owned());
+        }
+    }
+
+    /// Owning URI for a declared module name, if any resident document
+    /// currently declares it. Least URI wins.
+    pub(crate) fn module_uri(&self, module: &str) -> Option<String> {
+        if let Some(uri) = self
+            .module_claims
+            .read()
+            .ok()?
+            .get(module)
+            .and_then(|claimants| claimants.first().cloned())
+        {
+            return Some(uri);
+        }
+        // Miss: a registered-but-unloaded document may declare the module
+        // (discovery registers without loading). Scan once, loading content
+        // exactly as resolution always has, then retry.
+        self.scan_modules_for(module)
+    }
+
+    /// Load every content-free document and claim its module, then retry one
+    /// module lookup. The per-document load and claim commit atomically under
+    /// the documents write guard.
+    fn scan_modules_for(&self, module: &str) -> Option<String> {
+        let uris: Vec<String> = self.read_documents().ok()?.keys().cloned().collect();
+        for uri in uris {
+            let Ok(mut documents) = self.write_documents() else {
+                continue;
+            };
+            let Some(document) = documents.get_mut(&uri) else {
+                continue;
+            };
+            if document.stored().is_some() {
+                continue;
+            }
+            let path = document.path.clone().or_else(|| path_from_uri(&uri));
+            let text = path.and_then(|path| {
+                let text = fs::read_to_string(&path).ok()?;
+                if text.len() > MAX_DOCUMENT_BYTES {
+                    return None;
+                }
+                document.path = Some(path);
+                Some(text)
+            });
+            let Some(text) = text else {
+                continue;
+            };
+            let sealed = Self::seal_content(&uri, text);
+            let new_module = sealed.module.clone();
+            document.disk = Some(sealed);
+            self.bump_content_version();
+            self.note_module_change(&uri, None, new_module.as_deref());
+        }
+        self.module_claims
+            .read()
+            .ok()?
+            .get(module)
+            .and_then(|claimants| claimants.first().cloned())
     }
 
     pub fn workspace_root(&self) -> Option<PathBuf> {
@@ -149,9 +324,9 @@ impl DocumentStore {
             if text.len() > MAX_DOCUMENT_BYTES {
                 continue;
             }
-            let identity = self.envelope(&uri, &text).identity;
+            let sealed = Self::seal_content(&uri, text);
             let differs = checkpoint
-                .map(|values| values.get(&uri) != Some(&identity))
+                .map(|values| values.get(&uri) != Some(&sealed.identity))
                 .unwrap_or(false);
             let mut documents = self.write_documents()?;
             let Some(document) = documents.get_mut(&uri) else {
@@ -160,9 +335,18 @@ impl DocumentStore {
             if document.open() {
                 continue;
             }
-            document.disk = Some(Arc::new(text));
+            let old_module = document.effective_module().map(str::to_owned);
+            let old_identity = document.stored().map(|stored| stored.identity.clone());
+            document.disk = Some(sealed);
             document.path = Some(path);
+            self.bump_content_version();
+            let new_module = document.effective_module().map(str::to_owned);
+            let new_identity = document.stored().map(|stored| stored.identity.clone());
+            self.note_module_change(&uri, old_module.as_deref(), new_module.as_deref());
             drop(documents);
+            if old_identity != new_identity {
+                self.notify_content_changed(&uri);
+            }
             if differs {
                 changed.push((uri, self.generations.next()));
             }
@@ -276,6 +460,7 @@ impl DocumentStore {
         if text.len() > MAX_DOCUMENT_BYTES {
             return Ok(None);
         }
+        let sealed = Self::seal_content(uri, text);
         let mut documents = self.write_documents()?;
         let Some(document) = documents.get_mut(uri) else {
             return Ok(None);
@@ -283,7 +468,12 @@ impl DocumentStore {
         if document.open() || document.disk.is_some() {
             return Ok(None);
         }
-        document.disk = Some(Arc::new(text));
+        document.disk = Some(sealed);
+        self.bump_content_version();
+        let new_module = document.effective_module().map(str::to_owned);
+        // Previously content-free: any declared module is a new claim.
+        self.note_module_change(uri, None, new_module.as_deref());
+        drop(documents);
         Ok(Some(self.generations.next()))
     }
 
@@ -298,7 +488,7 @@ impl DocumentStore {
             .map_err(|_| ServiceError::InvalidRequest {
                 reason: "workspace refresh is already running".to_owned(),
             })?;
-        let candidates: Vec<(String, PathBuf, bool, Option<Arc<String>>)> = self
+        let candidates: Vec<(String, PathBuf, bool, Option<StoredContent>)> = self
             .read_documents()?
             .iter()
             .filter_map(|(uri, document)| {
@@ -320,18 +510,24 @@ impl DocumentStore {
             // Discovery establishes the filesystem baseline.  A first refresh
             // must not manufacture a user edit event for every known file.
             if previous.is_none() {
+                let sealed = Self::seal_content(&uri, text);
                 let mut documents = self.write_documents()?;
                 if let Some(document) = documents.get_mut(&uri) {
                     if !document.open() {
-                        document.disk = Some(Arc::new(text));
+                        document.disk = Some(sealed);
+                        self.bump_content_version();
+                        let new_module = document.effective_module().map(str::to_owned);
+                        self.note_module_change(&uri, None, new_module.as_deref());
+                        drop(documents);
                     }
                 }
                 continue;
             }
-            let same = previous.as_deref().map(String::as_str) == Some(text.as_str());
+            let same = previous.as_ref().map(|stored| stored.text.as_str()) == Some(text.as_str());
             if same {
                 continue;
             }
+            let sealed = Self::seal_content(&uri, text);
             let mut documents = self.write_documents()?;
             let Some(document) = documents.get_mut(&uri) else {
                 continue;
@@ -339,7 +535,14 @@ impl DocumentStore {
             if document.open() {
                 continue;
             }
-            document.disk = Some(Arc::new(text));
+            let old_module = document.effective_module().map(str::to_owned);
+            document.disk = Some(sealed);
+            self.bump_content_version();
+            let new_module = document.effective_module().map(str::to_owned);
+            self.note_module_change(&uri, old_module.as_deref(), new_module.as_deref());
+            drop(documents);
+            // The caller verified the bytes differ, so this is a real change.
+            self.notify_content_changed(&uri);
             let generation = self.generations.next();
             changed.push((uri, generation));
         }
@@ -360,6 +563,7 @@ impl DocumentStore {
                 buffer: None,
             },
         );
+        self.bump_content_version();
         Ok(true)
     }
 
@@ -371,12 +575,17 @@ impl DocumentStore {
                 reason: format!("document exceeds {MAX_DOCUMENT_BYTES} bytes"),
             });
         }
+        let sealed = Self::seal_content(uri, text);
         let mut documents = self.write_documents()?;
         let generation = self.generations.next();
+        let old_module = documents
+            .get(uri)
+            .and_then(|document| document.effective_module().map(str::to_owned));
         let path = documents
             .get(uri)
             .and_then(|document| document.path.clone())
             .or_else(|| path_from_uri(uri));
+        let new_module = sealed.module.clone();
         documents.insert(
             uri.to_owned(),
             Document {
@@ -384,10 +593,14 @@ impl DocumentStore {
                 disk: None,
                 buffer: Some(Buffer {
                     version,
-                    text: Arc::new(text),
+                    content: sealed,
                 }),
             },
         );
+        self.bump_content_version();
+        self.note_module_change(uri, old_module.as_deref(), new_module.as_deref());
+        drop(documents);
+        self.notify_content_changed(uri);
         Ok(generation)
     }
 
@@ -444,10 +657,20 @@ impl DocumentStore {
             document
                 .buffer
                 .as_ref()
-                .map(|buffer| (*buffer.text).clone())
+                .map(|buffer| (*buffer.content.text).clone())
         });
+        let old_module = document.effective_module().map(str::to_owned);
+        let old_identity = document.stored().map(|stored| stored.identity.clone());
         if let Some(saved) = saved {
-            document.disk = Some(Arc::new(saved));
+            document.disk = Some(Self::seal_content(uri, saved));
+            self.bump_content_version();
+        }
+        let new_module = document.effective_module().map(str::to_owned);
+        let new_identity = document.stored().map(|stored| stored.identity.clone());
+        self.note_module_change(uri, old_module.as_deref(), new_module.as_deref());
+        drop(documents);
+        if old_identity != new_identity {
+            self.notify_content_changed(uri);
         }
         Ok(self.generations.current())
     }
@@ -462,13 +685,28 @@ impl DocumentStore {
             .ok_or_else(|| ServiceError::DocumentNotFound {
                 uri: uri.to_owned(),
             })?;
+        let old_module = document.effective_module().map(str::to_owned);
         let had_unsaved = document.buffer.is_some() && document.disk.is_none();
+        let had_buffer = document.buffer.is_some();
         document.buffer = None;
+        if had_buffer {
+            self.bump_content_version();
+        }
         if had_unsaved && document.disk.is_none() && document.path.is_none() {
             documents.remove(uri);
+            self.note_module_change(uri, old_module.as_deref(), None);
+            drop(documents);
+            self.notify_content_changed(uri);
             return Ok(None);
         }
-        Ok(document.content().map(|text| (*text).clone()))
+        let new_module = document.effective_module().map(str::to_owned);
+        let content = document.content().map(|text| (*text).clone());
+        self.note_module_change(uri, old_module.as_deref(), new_module.as_deref());
+        drop(documents);
+        if had_buffer {
+            self.notify_content_changed(uri);
+        }
+        Ok(content)
     }
 
     /// Load disk content lazily for a known document (e.g., discovered file
@@ -515,6 +753,7 @@ impl DocumentStore {
                     buffer: None,
                 },
             );
+            self.bump_content_version();
         }
         let document = documents
             .get_mut(uri)
@@ -525,8 +764,14 @@ impl DocumentStore {
             if let Some(path) = document.path.clone().or_else(|| path_from_uri(uri)) {
                 if let Ok(text) = fs::read_to_string(&path) {
                     if text.len() <= MAX_DOCUMENT_BYTES {
-                        document.disk = Some(Arc::new(text));
+                        document.disk = Some(Self::seal_content(uri, text));
+                        self.bump_content_version();
                         document.path = Some(path);
+                        let new_module = document.effective_module().map(str::to_owned);
+                        // Previously content-free: any declared module is a new claim.
+                        self.note_module_change(uri, None, new_module.as_deref());
+                        drop(documents);
+                        return Ok(());
                     }
                 }
             }
@@ -590,9 +835,48 @@ impl DocumentStore {
             .unwrap_or(false)
     }
 
+    /// Cached authoritative identity for the document's current content:
+    /// exactly `envelope(uri, content).identity`, sealed when the content
+    /// was stored. Warm queries must use this instead of re-sealing.
+    pub fn content_identity(&self, uri: &str) -> Result<String, ServiceError> {
+        self.ensure_loaded(uri)?;
+        let documents = self.read_documents()?;
+        let document = documents
+            .get(uri)
+            .ok_or_else(|| ServiceError::DocumentNotFound {
+                uri: uri.to_owned(),
+            })?;
+        document
+            .stored()
+            .map(|stored| stored.identity.clone())
+            .ok_or_else(|| ServiceError::DocumentNotFound {
+                uri: uri.to_owned(),
+            })
+    }
+
+    /// Cached declared `module` name for the document's current content.
+    pub fn declared_module(&self, uri: &str) -> Result<Option<String>, ServiceError> {
+        self.ensure_loaded(uri)?;
+        let documents = self.read_documents()?;
+        let document = documents
+            .get(uri)
+            .ok_or_else(|| ServiceError::DocumentNotFound {
+                uri: uri.to_owned(),
+            })?;
+        Ok(document.stored().and_then(|stored| stored.module.clone()))
+    }
+
     /// Build the authoritative source envelope for the document's current
     /// content. The envelope identity doubles as the content fingerprint.
+    /// Prefer [`Self::content_identity`] when only the fingerprint is needed.
     pub fn envelope(&self, uri: &str, text: &str) -> SourceEnvelope {
+        Self::envelope_for(uri, text)
+    }
+
+    /// Pure envelope constructor shared by [`Self::envelope`] and the
+    /// store-time sealing path, so cached identities are definitionally
+    /// identical to freshly built envelopes.
+    fn envelope_for(uri: &str, text: &str) -> SourceEnvelope {
         let origin_kind = if uri.starts_with("untitled:")
             || (!uri.starts_with("file:") && !Path::new(uri).is_absolute())
         {

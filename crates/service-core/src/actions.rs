@@ -10,7 +10,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::coords::RangeInfo;
-use crate::indexes::SymbolKind;
 use crate::queries::{snapshot_info, ResponseStatus, ServiceError, SnapshotInfo};
 use crate::rename::FileEdit;
 
@@ -106,40 +105,20 @@ impl LanguageService {
     /// Module-level subjects named `name` exported from other modules:
     /// `(module name, defining URI)`, ordered deterministically.
     fn exporters_of(&self, name: &str, except_uri: &str) -> Vec<ExportCandidate> {
-        let mut candidates = Vec::new();
-        let mut uris = self.store.document_uris();
-        uris.sort();
-        for candidate_uri in uris {
-            if candidate_uri == except_uri {
-                continue;
-            }
-            let Ok(candidate) = self.snapshot(&candidate_uri) else {
-                continue;
-            };
-            let module = candidate
-                .front_end
-                .ast
-                .as_ref()
-                .map(|ast| ast.module.text.clone())
-                .unwrap_or_default();
-            if module.is_empty() {
-                continue;
-            }
-            let exports = candidate.symbols.symbols.iter().any(|entry| {
-                entry.name == name
-                    && entry.container.is_none()
-                    && matches!(
-                        entry.kind,
-                        SymbolKind::Function | SymbolKind::FiniteType | SymbolKind::RecordType
-                    )
-            });
-            if exports {
-                candidates.push(ExportCandidate {
-                    module,
-                    uri: candidate_uri,
-                });
-            }
-        }
+        let _ = self.ensure_workspace_entries();
+        let mut candidates: Vec<ExportCandidate> = self
+            .workspace_index
+            .read()
+            .ok()
+            .map(|index| {
+                index
+                    .exporters_of(name)
+                    .into_iter()
+                    .filter(|(_, uri)| uri != except_uri)
+                    .map(|(module, uri)| ExportCandidate { module, uri })
+                    .collect()
+            })
+            .unwrap_or_default();
         candidates.sort_by(|left, right| {
             left.module
                 .cmp(&right.module)

@@ -200,14 +200,12 @@ impl LanguageService {
         // baseline uses: its `use` targets resolve against workspace
         // documents and configured library roots, so editing an importing
         // module never produces false unresolvable-import diagnostics.
-        let dependencies =
-            crate::modules::DependencyFingerprints::collect(&self.store, candidate_text);
         let resolver = crate::modules::StoreResolver::new(&self.store);
         let candidate = Arc::new(DocumentAnalysis::analyze_with_resolver(
             uri,
             candidate_envelope,
             generation,
-            dependencies,
+            &self.store,
             &resolver,
         ));
 

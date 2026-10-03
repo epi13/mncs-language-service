@@ -126,6 +126,36 @@ workspace state
 
 Snapshot identity and invalidation policy should derive from authoritative language identities wherever practical rather than introducing an unrelated notion of semantic identity.
 
+## Resident workspace indexes (implemented)
+
+Cross-document queries are served from resident indexes derived from published snapshots, not from per-query snapshot storms:
+
+```text
+content change
+    │
+    ├── seal identity + module once, at store time
+    ├── re-analyze only the affected document(s)
+    ├── publish one index entry per analyzed snapshot
+    └── invalidate the changed document + its transitive importers
+
+warm query
+    │
+    ├── validate entries (O(1) fast path while the store is unchanged)
+    ├── look up identity / declaration / reference / dependency maps
+    └── return pre-projected summaries and ranges
+```
+
+State and invariants:
+
+- **Sealed content.** Every stored text carries its authoritative envelope identity and declared module, computed once when stored. Warm paths compare cached strings; nothing re-hashes content per query.
+- **Module directory.** Module name → claiming URIs, maintained incrementally at every mutation (least URI wins, exactly as a fresh scan would produce). A miss scans once for registered-but-unloaded documents, then retries.
+- **Dependency fingerprints.** Recorded from the compiler's authoritative `module_resolutions` provenance (what the compiler consumed, not what is current after analysis), so a dependency edited mid-analysis still invalidates correctly.
+- **Index entries.** One entry per analyzed document: projected symbol summaries, identity/declaration maps, reference occurrences with pre-projected ranges and enclosing functions, type/export maps, and dependency edges. Global maps invert entries for O(hits) joins.
+- **Validation.** An entry is usable while its source identity matches and its recorded fingerprints still match a fresh cheap resolution (full map equality, so newly-appearing dependencies invalidate too).
+- **Transitive invalidation.** Committed content changes drop snapshots and entries for the changed document and all transitive importers; unaffected documents keep their state. Direct-only validation would serve stale elaborations downstream.
+- **Fast path.** A store mutation counter lets workspace-wide validation skip per-document checks entirely when nothing changed; importers of external (library) files always re-validate individually.
+- **Memory.** Entries are evicted with snapshots; index sizes are observable via `service_stats` alongside frontend-run and repair counters.
+
 ## Incrementality
 
 Incremental behavior is a service concern; semantic correctness is still a language concern.

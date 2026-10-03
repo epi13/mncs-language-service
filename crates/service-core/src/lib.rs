@@ -32,6 +32,7 @@ mod native_query;
 mod queries;
 mod rename;
 mod render;
+mod workspace_index;
 
 pub use actions::{CodeAction, CodeActionsResponse};
 pub use ambient::{
@@ -46,7 +47,10 @@ pub use candidate::{
     CandidateAnalysisResponse, CandidateObligation, ChangedIdentity, DiagnosticsDelta,
     ObligationDelta, ObligationStatusChange, SemanticDelta, StaleEvidenceItem,
 };
-pub use client::{serve_unix, LanguageServiceClient, RemoteLanguageService, RpcRequest};
+pub use client::{
+    serve_unix, BatchCall, BatchResult, LanguageServiceClient, RemoteLanguageService, RpcRequest,
+    MAX_BATCH_CALLS, MAX_REQUEST_LINE_BYTES,
+};
 pub use coords::{PositionInfo, PositionMap, RangeInfo};
 pub use debug_binding::{
     DebugBindingResolution, DebugCapabilityState, DebugCapabilityStatus, DebugSourceBinding,
@@ -87,7 +91,9 @@ pub use queries::{
     NativeObligationsResponse, ObligationInfo, ObligationsForUri, ObligationsResponse, Occurrence,
     OccurrenceRole, PositionQueryResponse, ReferenceHit, ReferencesResponse, ResponseStatus,
     SemanticTokensResponse, SnapshotInfo, StatusCounts, SubjectDescription, SymbolSummary,
-    TokenAnnotation, TokenClass, WorkspaceStatusResponse, WorkspaceSymbolHit,
-    WorkspaceSymbolsResponse,
+    TokenAnnotation, TokenClass, TransitiveCallerNode, TransitiveCallersResponse,
+    TransitiveDepNode, TransitiveDepsResponse, WorkspaceStatusResponse, WorkspaceSymbolHit,
+    WorkspaceSymbolsResponse, MAX_TRANSITIVE_DEPTH, MAX_TRANSITIVE_NODES,
 };
 pub use rename::{FileEdit, RenameResponse, SingleEdit};
+pub use workspace_index::ServiceStatsSnapshot;

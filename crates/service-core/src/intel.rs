@@ -149,25 +149,23 @@ impl LanguageService {
             let owned = self.cached_snapshot_arc(uri)?;
             return Some((uri.to_owned(), owned, index));
         }
-        let mut uris = self.store.document_uris();
-        uris.sort();
-        for candidate_uri in uris {
-            if candidate_uri == uri {
-                continue;
-            }
-            let Ok(candidate) = self.snapshot(&candidate_uri) else {
-                continue;
-            };
-            if let Some(index) = candidate
-                .symbols
-                .symbols
-                .iter()
-                .position(|entry| entry.kind == SymbolKind::Function && entry.name == name)
-            {
-                return Some((candidate_uri, candidate, index));
-            }
-        }
-        None
+        let _ = self.ensure_workspace_entries();
+        let found = self.workspace_index.read().ok().and_then(|index| {
+            index
+                .lookup_function(name)
+                .into_iter()
+                .find(|(candidate_uri, _)| candidate_uri != uri)
+        })?;
+        // The index selects the owning document; the symbol position is
+        // re-derived from the live snapshot so a concurrent edit cannot
+        // misalign the returned index.
+        let owned = self.snapshot(&found.0).ok()?;
+        let index = owned
+            .symbols
+            .symbols
+            .iter()
+            .position(|entry| entry.kind == SymbolKind::Function && entry.name == name)?;
+        Some((found.0, owned, index))
     }
 
     fn cached_snapshot_arc(&self, uri: &str) -> Option<Arc<DocumentAnalysis>> {
@@ -381,19 +379,15 @@ impl LanguageService {
                 definitions: Vec::new(),
             });
         }
+        let _ = self.ensure_workspace_entries();
         let mut definitions = Vec::new();
-        let mut uris = self.store.document_uris();
-        uris.sort();
-        for candidate_uri in uris {
-            let Ok(candidate) = self.snapshot(&candidate_uri) else {
-                continue;
-            };
-            for index in 0..candidate.symbols.symbols.len() {
-                let entry = &candidate.symbols.symbols[index];
-                if entry.name == type_name
-                    && matches!(entry.kind, SymbolKind::FiniteType | SymbolKind::RecordType)
+        if let Ok(index) = self.workspace_index.read() {
+            for (uri, symbol) in index.lookup_type(&type_name) {
+                if let Some(summary) = index
+                    .entry(&uri)
+                    .and_then(|entry| entry.symbols.get(symbol))
                 {
-                    definitions.push(summarize(&candidate_uri, &candidate, index));
+                    definitions.push(summary.clone());
                 }
             }
         }
@@ -650,40 +644,40 @@ impl LanguageService {
         // Group call sites by (document, enclosing function).
         let mut groups: std::collections::BTreeMap<(String, usize), Vec<RangeInfo>> =
             std::collections::BTreeMap::new();
-        let mut uris = self.store.document_uris();
-        uris.sort();
-        for candidate_uri in uris {
-            let Ok(candidate) = self.snapshot(&candidate_uri) else {
+        let _ = self.ensure_workspace_entries();
+        let occurrences = self
+            .workspace_index
+            .read()
+            .ok()
+            .map(|index| index.occurrences_for_declaration(declaration, SymbolKind::Function))
+            .unwrap_or_default();
+        for occurrence in occurrences {
+            let Some(caller) = occurrence.enclosing_function else {
                 continue;
             };
-            let text = candidate.text();
-            for reference in &candidate.symbols.references {
-                if reference.kind != SymbolKind::Function
-                    || reference.declaration_span != declaration
-                {
-                    continue;
-                }
-                let Some(caller) = enclosing_function(&candidate, reference.occurrence_span.start)
+            groups
+                .entry((occurrence.uri, caller))
+                .or_default()
+                .push(occurrence.range);
+        }
+        let mut edges = Vec::new();
+        if let Ok(index) = self.workspace_index.read() {
+            for ((caller_uri, caller_index), from_ranges) in groups {
+                // A missing entry means the document changed under the
+                // query (concurrent eviction); skipping the edge is the
+                // read-committed answer where the snapshot storm would fail
+                // the whole query.
+                let Some(summary) = index
+                    .entry(&caller_uri)
+                    .and_then(|entry| entry.symbols.get(caller_index))
                 else {
                     continue;
                 };
-                groups
-                    .entry((candidate_uri.clone(), caller))
-                    .or_default()
-                    .push(
-                        candidate
-                            .positions
-                            .range_of(text, reference.occurrence_span),
-                    );
+                edges.push(CallHierarchyEdge {
+                    item: hierarchy_item_from_summary(summary, &caller_uri),
+                    from_ranges,
+                });
             }
-        }
-        let mut edges = Vec::new();
-        for ((caller_uri, caller_index), from_ranges) in groups {
-            let caller_snapshot = self.snapshot(&caller_uri)?;
-            edges.push(CallHierarchyEdge {
-                item: hierarchy_item(&caller_uri, &caller_snapshot, caller_index),
-                from_ranges,
-            });
         }
         edges.sort_by(|left, right| {
             (left.item.uri.clone(), left.item.name.clone())
@@ -799,40 +793,47 @@ impl LanguageService {
         &self,
         identity: &str,
     ) -> Option<(String, Arc<DocumentAnalysis>, usize)> {
-        let mut uris = self.store.document_uris();
-        uris.sort();
-        for candidate_uri in uris {
-            let Ok(candidate) = self.snapshot(&candidate_uri) else {
-                continue;
-            };
-            if let Some(index) = candidate.symbols.symbols.iter().position(|entry| {
-                entry
-                    .identity
-                    .as_ref()
-                    .is_some_and(|id| id.as_str() == identity)
-            }) {
-                return Some((candidate_uri, candidate, index));
-            }
-        }
-        None
+        let _ = self.ensure_workspace_entries();
+        let (uri, _) = self
+            .workspace_index
+            .read()
+            .ok()?
+            .lookup_identity(identity)?;
+        // The index selects the owning document; the symbol position is
+        // re-derived from the live snapshot so a concurrent edit cannot
+        // misalign the returned index.
+        let snapshot = self.snapshot(&uri).ok()?;
+        let index = snapshot.symbols.symbols.iter().position(|entry| {
+            entry
+                .identity
+                .as_ref()
+                .is_some_and(|id| id.as_str() == identity)
+        })?;
+        Some((uri, snapshot, index))
     }
 }
 
 fn hierarchy_item(uri: &str, snapshot: &DocumentAnalysis, index: usize) -> CallHierarchyItem {
-    let summary = summarize(uri, snapshot, index);
+    hierarchy_item_from_summary(&summarize(uri, snapshot, index), uri)
+}
+
+fn hierarchy_item_from_summary(summary: &SymbolSummary, fallback_uri: &str) -> CallHierarchyItem {
     CallHierarchyItem {
-        name: summary.name,
+        name: summary.name.clone(),
         kind: summary.kind,
-        identity: summary.identity,
-        uri: summary.uri.unwrap_or_else(|| uri.to_owned()),
+        identity: summary.identity.clone(),
+        uri: summary
+            .uri
+            .clone()
+            .unwrap_or_else(|| fallback_uri.to_owned()),
         range: summary.range,
         name_range: summary.name_range,
-        detail: summary.detail,
+        detail: summary.detail.clone(),
     }
 }
 
 /// Innermost function whose full span contains `byte`.
-fn enclosing_function(snapshot: &DocumentAnalysis, byte: usize) -> Option<usize> {
+pub(crate) fn enclosing_function(snapshot: &DocumentAnalysis, byte: usize) -> Option<usize> {
     let ast = snapshot.front_end.ast.as_ref()?;
     let function = ast
         .functions

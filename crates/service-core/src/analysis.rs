@@ -35,30 +35,55 @@ pub struct DocumentAnalysis {
 impl DocumentAnalysis {
     pub fn analyze(uri: &str, envelope: SourceEnvelope, generation: u64) -> Self {
         let null = mncs_compiler::NullResolver;
-        Self::analyze_with_resolver(
-            uri,
-            envelope,
-            generation,
-            crate::modules::DependencyFingerprints::default(),
-            &null,
-        )
+        Self::analyze_without_store(uri, envelope, generation, &null)
     }
 
-    /// Analyzes with a module resolver so `use` declarations link against
-    /// resident workspace documents. `dependencies` must be collected from
-    /// the same store state before analysis and is retained for staleness
-    /// checks.
-    pub fn analyze_with_resolver(
+    /// Analyzes without store-backed dependency tracking (null resolution).
+    fn analyze_without_store(
         uri: &str,
         envelope: SourceEnvelope,
         generation: u64,
-        dependencies: crate::modules::DependencyFingerprints,
         resolver: &dyn mncs_compiler::ModuleResolver,
     ) -> Self {
         let language_profile = envelope.language_version.clone();
         let front_end =
             mncs_compiler::ReferenceCompiler::default().front_end_with_resolver(envelope, resolver);
         let text = front_end.envelope.text.clone();
+        let positions = PositionMap::new(&text);
+        let symbols = SymbolIndex::build(&front_end);
+        Self {
+            uri: uri.to_owned(),
+            source_identity: front_end.envelope.identity.clone(),
+            generation,
+            language_profile,
+            front_end,
+            positions,
+            symbols,
+            dependencies: crate::modules::DependencyFingerprints::default(),
+        }
+    }
+
+    /// Analyzes with a module resolver so `use` declarations link against
+    /// resident workspace documents. Dependency fingerprints record the exact
+    /// source identities the compiler consumed (authoritative
+    /// `module_resolutions` provenance) and are retained for staleness
+    /// checks.
+    pub fn analyze_with_resolver(
+        uri: &str,
+        envelope: SourceEnvelope,
+        generation: u64,
+        store: &crate::document::DocumentStore,
+        resolver: &dyn mncs_compiler::ModuleResolver,
+    ) -> Self {
+        let language_profile = envelope.language_version.clone();
+        let front_end =
+            mncs_compiler::ReferenceCompiler::default().front_end_with_resolver(envelope, resolver);
+        let text = front_end.envelope.text.clone();
+        let dependencies = crate::modules::DependencyFingerprints::from_consumed(
+            store,
+            &text,
+            &front_end.module_resolutions,
+        );
         let positions = PositionMap::new(&text);
         let symbols = SymbolIndex::build(&front_end);
         Self {

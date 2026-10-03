@@ -94,55 +94,49 @@ impl LanguageService {
         let declaration = entry.name_span;
         let kind = entry.kind;
         let old_name = entry.name.clone();
-        let mut per_file: std::collections::BTreeMap<String, Vec<(usize, usize)>> =
+        let mut per_file: std::collections::BTreeMap<String, Vec<RangeInfo>> =
             std::collections::BTreeMap::new();
         let mut unresolved = Vec::new();
 
         // Declaration edit in the owning document.
-        per_file.entry(owner_uri.clone()).or_default().push((
-            owner_snapshot.symbols.symbols[target].name_span.start,
-            owner_snapshot.symbols.symbols[target].name_span.end,
-        ));
+        per_file.entry(owner_uri.clone()).or_default().push(
+            owner_snapshot
+                .positions
+                .range_of(owner_snapshot.text(), entry.name_span),
+        );
 
-        let mut uris = self.store.document_uris();
-        uris.sort();
-        for candidate_uri in uris {
-            let Ok(candidate) = self.snapshot(&candidate_uri) else {
-                unresolved.push(format!("skipped unreachable document {candidate_uri}"));
-                continue;
-            };
-            let text = candidate.text();
-            for reference in &candidate.symbols.references {
-                if reference.kind != kind || reference.declaration_span != declaration {
-                    continue;
-                }
-                let Some(spelling) =
-                    text.get(reference.occurrence_span.start..reference.occurrence_span.end)
-                else {
-                    continue;
-                };
-                if spelling != old_name {
-                    continue;
-                }
-                per_file.entry(candidate_uri.clone()).or_default().push((
-                    reference.occurrence_span.start,
-                    reference.occurrence_span.end,
-                ));
-            }
+        for failed_uri in self.ensure_workspace_entries() {
+            unresolved.push(format!("skipped unreachable document {failed_uri}"));
+        }
+        let key = crate::workspace_index::OccurrenceKey {
+            decl_start: declaration.start,
+            decl_end: declaration.end,
+            decl_line: declaration.line,
+            decl_column: declaration.column,
+            kind,
+            name: Some(old_name.clone()),
+        };
+        let occurrences = self
+            .workspace_index
+            .read()
+            .ok()
+            .map(|index| index.lookup_occurrences(&key))
+            .unwrap_or_default();
+        for occurrence in occurrences {
+            per_file
+                .entry(occurrence.uri)
+                .or_default()
+                .push(occurrence.range);
         }
 
         let mut changes = Vec::new();
-        for (file_uri, mut spans) in per_file {
-            spans.sort();
-            spans.dedup();
-            let candidate = self.snapshot(&file_uri)?;
-            let text = candidate.text();
+        for (file_uri, mut ranges) in per_file {
+            ranges.sort_by_key(|range| (range.start_byte, range.end_byte));
+            ranges.dedup();
             let mut edits = Vec::new();
-            for (start, end) in spans {
+            for range in ranges {
                 edits.push(SingleEdit {
-                    range: candidate
-                        .positions
-                        .range_of(text, mncs_syntax::SourceSpan::at(text, start, end)),
+                    range,
                     new_text: new_name.to_owned(),
                 });
             }
