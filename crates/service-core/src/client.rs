@@ -20,7 +20,8 @@ use crate::{
     NativeObligationsResponse, PositionQueryResponse, PrepareCallHierarchyResponse,
     RangeFormattingResponse, ReferencesResponse, RenameResponse, SelectionRangesResponse,
     SemanticCapsuleResponse, SemanticImpactResponse, SemanticTokensResponse, ServiceError,
-    ServiceStatusResponse, SignatureHelpResponse, TextChange, WorkspaceEventCursor,
+    ServiceStatsSnapshot, ServiceStatusResponse, SignatureHelpResponse, TextChange,
+    TransitiveCallersResponse, TransitiveDepsResponse, WorkspaceEventCursor,
     WorkspaceStatusResponse, WorkspaceSymbolsResponse,
 };
 
@@ -44,6 +45,7 @@ pub trait LanguageServiceClient: Send + Sync {
     fn refresh_workspace(&self) -> Result<Vec<u64>, ServiceError>;
     fn workspace_status(&self) -> Result<WorkspaceStatusResponse, ServiceError>;
     fn service_status(&self) -> Result<ServiceStatusResponse, ServiceError>;
+    fn service_stats(&self) -> Result<ServiceStatsSnapshot, ServiceError>;
     fn semantic_capsule(
         &self,
         known_stream_identity: Option<&str>,
@@ -111,6 +113,21 @@ pub trait LanguageServiceClient: Send + Sync {
     fn workspace_symbols(&self, query: &str) -> Result<WorkspaceSymbolsResponse, ServiceError>;
     fn dependencies(&self, uri: &str, identity: &str) -> Result<GraphResponse, ServiceError>;
     fn dependents(&self, uri: &str, identity: &str) -> Result<GraphResponse, ServiceError>;
+    fn transitive_dependents(
+        &self,
+        uri: &str,
+        max_depth: usize,
+    ) -> Result<TransitiveDepsResponse, ServiceError>;
+    fn transitive_dependencies(
+        &self,
+        uri: &str,
+        max_depth: usize,
+    ) -> Result<TransitiveDepsResponse, ServiceError>;
+    fn transitive_callers(
+        &self,
+        identity: &str,
+        max_depth: usize,
+    ) -> Result<TransitiveCallersResponse, ServiceError>;
     fn semantic_impact(
         &self,
         uri: &str,
@@ -277,6 +294,9 @@ impl LanguageServiceClient for LanguageService {
     fn service_status(&self) -> Result<ServiceStatusResponse, ServiceError> {
         LanguageService::service_status(self)
     }
+    fn service_stats(&self) -> Result<ServiceStatsSnapshot, ServiceError> {
+        Ok(LanguageService::service_stats(self))
+    }
     fn semantic_capsule(
         &self,
         known_stream_identity: Option<&str>,
@@ -388,6 +408,27 @@ impl LanguageServiceClient for LanguageService {
     }
     fn dependents(&self, uri: &str, identity: &str) -> Result<GraphResponse, ServiceError> {
         LanguageService::dependents(self, uri, identity)
+    }
+    fn transitive_dependents(
+        &self,
+        uri: &str,
+        max_depth: usize,
+    ) -> Result<TransitiveDepsResponse, ServiceError> {
+        LanguageService::transitive_dependents(self, uri, max_depth)
+    }
+    fn transitive_dependencies(
+        &self,
+        uri: &str,
+        max_depth: usize,
+    ) -> Result<TransitiveDepsResponse, ServiceError> {
+        LanguageService::transitive_dependencies(self, uri, max_depth)
+    }
+    fn transitive_callers(
+        &self,
+        identity: &str,
+        max_depth: usize,
+    ) -> Result<TransitiveCallersResponse, ServiceError> {
+        LanguageService::transitive_callers(self, identity, max_depth)
     }
     fn semantic_impact(
         &self,
@@ -570,6 +611,12 @@ impl LanguageServiceClient for LanguageService {
 pub struct RemoteLanguageService {
     socket: Arc<PathBuf>,
     root: Arc<RwLock<Option<PathBuf>>>,
+    /// Persistent connection shared by clones. Calls multiplex over one
+    /// Unix socket (one request/response at a time) instead of paying
+    /// connect setup per query; a broken connection reconnects once.
+    conn: Arc<std::sync::Mutex<Option<std::io::BufReader<std::os::unix::net::UnixStream>>>>,
+    next_id: Arc<std::sync::atomic::AtomicU64>,
+    connections: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl RemoteLanguageService {
@@ -577,59 +624,143 @@ impl RemoteLanguageService {
         Self {
             socket: Arc::new(path.as_ref().to_path_buf()),
             root: Arc::new(RwLock::new(None)),
+            conn: Arc::new(std::sync::Mutex::new(None)),
+            next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            connections: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// How many socket connections this client (and its clones) established.
+    /// Warm steady state holds this at one per server lifetime.
+    pub fn connection_count(&self) -> u64 {
+        self.connections.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Run several calls in one round trip. Each item resolves or fails
+    /// independently; one bad call never poisons the rest.
+    pub fn batch(&self, calls: Vec<BatchCall>) -> Result<Vec<BatchResult>, ServiceError> {
+        self.call("batch", json!({"calls": calls}))
     }
 
     fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T, ServiceError> {
-        let mut stream =
-            std::os::unix::net::UnixStream::connect(self.socket.as_ref()).map_err(|error| {
-                ServiceError::WorkspaceUnavailable {
-                    path: format!("{}: {error}", self.socket.display()),
-                }
-            })?;
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
-            .ok();
-        stream
-            .set_write_timeout(Some(std::time::Duration::from_secs(30)))
-            .ok();
-        let request = json!({"id": 1, "method": method, "params": params});
-        serde_json::to_writer(&mut stream, &request).map_err(|error| {
-            ServiceError::InvalidRequest {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let request = serde_json::to_string(&json!({"id": id, "method": method, "params": params}))
+            .map_err(|error| ServiceError::InvalidRequest {
                 reason: error.to_string(),
-            }
+            })?;
+        // One reconnect on transport failure (a restarted server shows up
+        // as a broken pipe, not an error response). Logical answers —
+        // including failures — return immediately and never resend. A retry
+        // after a lost response may re-apply a mutation, but versions make
+        // document mutations idempotent in effect.
+        let mut guard = self.conn.lock().map_err(|_| ServiceError::InvalidRequest {
+            reason: "resident connection state was poisoned".to_owned(),
         })?;
-        stream
-            .write_all(b"\n")
-            .map_err(|error| ServiceError::WorkspaceUnavailable {
-                path: error.to_string(),
-            })?;
-        let mut line = String::new();
-        std::io::BufReader::new(stream)
-            .read_line(&mut line)
-            .map_err(|error| ServiceError::WorkspaceUnavailable {
-                path: error.to_string(),
-            })?;
-        let response: RpcResponse =
-            serde_json::from_str(&line).map_err(|error| ServiceError::InvalidRequest {
-                reason: format!("invalid resident response: {error}"),
-            })?;
-        if !response.ok {
-            return Err(ServiceError::InvalidRequest {
-                reason: response
-                    .error
-                    .unwrap_or_else(|| "resident service request failed".to_owned()),
-            });
+        if guard.is_none() {
+            *guard = Some(connect(&self.socket)?);
+            self.connections
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        serde_json::from_value(response.result.unwrap_or(Value::Null)).map_err(|error| {
-            ServiceError::InvalidRequest {
-                reason: format!("invalid resident result for {method}: {error}"),
+        let stream = guard.as_mut().expect("connected");
+        match call_once(stream, &request, id, method) {
+            Ok(value) => Ok(value),
+            Err(CallFailure::Logical(error)) => Err(error),
+            Err(CallFailure::Transport(_)) => {
+                *guard = Some(connect(&self.socket)?);
+                self.connections
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let stream = guard.as_mut().expect("reconnected");
+                call_once(stream, &request, id, method).map_err(CallFailure::into_error)
             }
-        })
+        }
     }
 }
 
-use std::io::{BufRead, Write};
+/// Transport failures (reconnect and retry once) versus logical answers
+/// (return as-is, never resend).
+enum CallFailure {
+    Transport(ServiceError),
+    Logical(ServiceError),
+}
+
+impl CallFailure {
+    fn into_error(self) -> ServiceError {
+        match self {
+            Self::Transport(error) | Self::Logical(error) => error,
+        }
+    }
+}
+
+fn connect(
+    socket: &Path,
+) -> Result<std::io::BufReader<std::os::unix::net::UnixStream>, ServiceError> {
+    let stream = std::os::unix::net::UnixStream::connect(socket).map_err(|error| {
+        ServiceError::WorkspaceUnavailable {
+            path: format!("{}: {error}", socket.display()),
+        }
+    })?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+        .ok();
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(30)))
+        .ok();
+    Ok(std::io::BufReader::new(stream))
+}
+
+fn call_once<T: DeserializeOwned>(
+    reader: &mut std::io::BufReader<std::os::unix::net::UnixStream>,
+    request: &str,
+    id: u64,
+    method: &str,
+) -> Result<T, CallFailure> {
+    use std::io::Write;
+    let transport =
+        |path: String| CallFailure::Transport(ServiceError::WorkspaceUnavailable { path });
+    let stream = reader.get_mut();
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|_| stream.write_all(b"\n"))
+        .map_err(|error| transport(error.to_string()))?;
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|error| transport(error.to_string()))?;
+    if line.is_empty() {
+        return Err(transport(
+            "resident service closed the connection".to_owned(),
+        ));
+    }
+    let response: RpcResponse = serde_json::from_str(&line).map_err(|error| {
+        CallFailure::Logical(ServiceError::InvalidRequest {
+            reason: format!("invalid resident response: {error}"),
+        })
+    })?;
+    if response.id != id {
+        // The connection serializes requests, so a mismatched id means the
+        // stream desynchronized; drop it rather than trusting alignment.
+        return Err(transport(format!(
+            "resident response id mismatch: expected {id}, got {}",
+            response.id
+        )));
+    }
+    if !response.ok {
+        return Err(CallFailure::Logical(ServiceError::InvalidRequest {
+            reason: response
+                .error
+                .unwrap_or_else(|| "resident service request failed".to_owned()),
+        }));
+    }
+    serde_json::from_value(response.result.unwrap_or(Value::Null)).map_err(|error| {
+        CallFailure::Logical(ServiceError::InvalidRequest {
+            reason: format!("invalid resident result for {method}: {error}"),
+        })
+    })
+}
+
+use std::io::{BufRead, Read};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RpcResponse {
@@ -701,6 +832,9 @@ impl LanguageServiceClient for RemoteLanguageService {
     }
     fn service_status(&self) -> Result<ServiceStatusResponse, ServiceError> {
         remote_call!(self, "service_status", json!({}), ServiceStatusResponse)
+    }
+    fn service_stats(&self) -> Result<ServiceStatsSnapshot, ServiceError> {
+        remote_call!(self, "service_stats", json!({}), ServiceStatsSnapshot)
     }
     fn semantic_capsule(
         &self,
@@ -879,6 +1013,42 @@ impl LanguageServiceClient for RemoteLanguageService {
             "dependents",
             json!({"uri": uri, "identity": identity}),
             GraphResponse
+        )
+    }
+    fn transitive_dependents(
+        &self,
+        uri: &str,
+        max_depth: usize,
+    ) -> Result<TransitiveDepsResponse, ServiceError> {
+        remote_call!(
+            self,
+            "transitive_dependents",
+            json!({"uri": uri, "max_depth": max_depth}),
+            TransitiveDepsResponse
+        )
+    }
+    fn transitive_dependencies(
+        &self,
+        uri: &str,
+        max_depth: usize,
+    ) -> Result<TransitiveDepsResponse, ServiceError> {
+        remote_call!(
+            self,
+            "transitive_dependencies",
+            json!({"uri": uri, "max_depth": max_depth}),
+            TransitiveDepsResponse
+        )
+    }
+    fn transitive_callers(
+        &self,
+        identity: &str,
+        max_depth: usize,
+    ) -> Result<TransitiveCallersResponse, ServiceError> {
+        remote_call!(
+            self,
+            "transitive_callers",
+            json!({"identity": identity, "max_depth": max_depth}),
+            TransitiveCallersResponse
         )
     }
     fn semantic_impact(
@@ -1163,6 +1333,32 @@ pub struct RpcRequest {
     pub params: Value,
 }
 
+/// One item of a `batch` call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchCall {
+    pub id: u64,
+    pub method: String,
+    #[serde(default)]
+    pub params: Value,
+}
+
+/// One item of a `batch` result. Items resolve or fail independently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchResult {
+    pub id: u64,
+    pub ok: bool,
+    #[serde(default)]
+    pub result: Option<Value>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Upper bound on calls accepted in one `batch` request.
+pub const MAX_BATCH_CALLS: usize = 256;
+/// Upper bound on one framed request line (64 MiB; whole-document
+/// payloads are bounded to 4 MiB by the store, batches well below this).
+pub const MAX_REQUEST_LINE_BYTES: u64 = 64 * 1024 * 1024;
+
 pub fn serve_unix(path: impl AsRef<Path>, service: Arc<LanguageService>) -> std::io::Result<()> {
     let path = path.as_ref();
     if path.exists() {
@@ -1181,41 +1377,64 @@ pub fn serve_unix(path: impl AsRef<Path>, service: Arc<LanguageService>) -> std:
 }
 
 fn handle_connection(stream: std::os::unix::net::UnixStream, service: Arc<LanguageService>) {
+    use std::io::BufRead;
     let mut reader = std::io::BufReader::new(stream);
-    let mut line = String::new();
-    if reader.read_line(&mut line).is_err() {
-        return;
-    }
-    let request: Result<RpcRequest, _> = serde_json::from_str(&line);
-    let (id, outcome) = match request {
-        Ok(request) => (
-            request.id,
-            dispatch(&service, &request.method, request.params),
-        ),
-        Err(error) => (
-            0,
-            Err(ServiceError::InvalidRequest {
-                reason: error.to_string(),
-            }),
-        ),
-    };
-    let response = match outcome {
-        Ok(result) => RpcResponse {
-            id,
-            ok: true,
-            result: Some(result),
-            error: None,
-        },
-        Err(error) => RpcResponse {
-            id,
-            ok: false,
-            result: None,
-            error: Some(error.to_string()),
-        },
-    };
-    let mut stream = reader.into_inner();
-    if serde_json::to_writer(&mut stream, &response).is_ok() {
-        let _ = stream.write_all(b"\n");
+    // Persistent framing: many requests per connection, one JSON value per
+    // line each way, until the client closes. One-shot clients that send a
+    // single line and disconnect keep working unchanged.
+    loop {
+        let mut raw = Vec::new();
+        let read = reader
+            .by_ref()
+            .take(MAX_REQUEST_LINE_BYTES + 1)
+            .read_until(b'\n', &mut raw);
+        match read {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(_) => return,
+        }
+        if raw.len() as u64 > MAX_REQUEST_LINE_BYTES {
+            return;
+        }
+        let line = String::from_utf8_lossy(&raw);
+        if line.trim().is_empty() {
+            continue;
+        }
+        let request: Result<RpcRequest, _> = serde_json::from_str(&line);
+        let (id, outcome) = match request {
+            Ok(request) => (
+                request.id,
+                dispatch(&service, &request.method, request.params),
+            ),
+            Err(error) => (
+                0,
+                Err(ServiceError::InvalidRequest {
+                    reason: error.to_string(),
+                }),
+            ),
+        };
+        let response = match outcome {
+            Ok(result) => RpcResponse {
+                id,
+                ok: true,
+                result: Some(result),
+                error: None,
+            },
+            Err(error) => RpcResponse {
+                id,
+                ok: false,
+                result: None,
+                error: Some(error.to_string()),
+            },
+        };
+        let mut encoded = serde_json::to_string(&response).unwrap_or_else(|_| {
+            "{\"id\":0,\"ok\":false,\"error\":\"response encoding failed\"}".to_owned()
+        });
+        encoded.push('\n');
+        let stream = reader.get_mut();
+        if std::io::Write::write_all(stream, encoded.as_bytes()).is_err() {
+            return;
+        }
     }
 }
 
@@ -1274,6 +1493,7 @@ fn dispatch(service: &LanguageService, method: &str, params: Value) -> Result<Va
         "refresh_workspace" => value(service.refresh_workspace()),
         "workspace_status" => value(service.workspace_status()),
         "service_status" => value(service.service_status()),
+        "service_stats" => value(Ok(service.service_stats())),
         "semantic_capsule" => {
             let known: Option<String> = optional(&params, "known_stream_identity")?;
             value(
@@ -1354,6 +1574,15 @@ fn dispatch(service: &LanguageService, method: &str, params: Value) -> Result<Va
         "dependents" => {
             value(service.dependents(&text(&params, "uri")?, &text(&params, "identity")?))
         }
+        "transitive_dependents" => value(
+            service.transitive_dependents(&text(&params, "uri")?, parse(&params, "max_depth")?),
+        ),
+        "transitive_dependencies" => value(
+            service.transitive_dependencies(&text(&params, "uri")?, parse(&params, "max_depth")?),
+        ),
+        "transitive_callers" => value(
+            service.transitive_callers(&text(&params, "identity")?, parse(&params, "max_depth")?),
+        ),
         "semantic_impact" => {
             value(service.semantic_impact(&text(&params, "uri")?, &text(&params, "identity")?))
         }
@@ -1449,6 +1678,48 @@ fn dispatch(service: &LanguageService, method: &str, params: Value) -> Result<Va
             parse(&params, "line")?,
             parse(&params, "character")?,
         )),
+        "batch" => {
+            let calls: Vec<BatchCall> = parse(&params, "calls")?;
+            if calls.len() > MAX_BATCH_CALLS {
+                return Err(ServiceError::InvalidRequest {
+                    reason: format!(
+                        "batch of {} calls exceeds the limit of {MAX_BATCH_CALLS}",
+                        calls.len()
+                    ),
+                });
+            }
+            let mut results = Vec::with_capacity(calls.len());
+            for call in calls {
+                // Batching `batch` nests pointlessly; reject it explicitly
+                // rather than recursing.
+                if call.method == "batch" {
+                    results.push(BatchResult {
+                        id: call.id,
+                        ok: false,
+                        result: None,
+                        error: Some("nested batch calls are not supported".to_owned()),
+                    });
+                    continue;
+                }
+                match dispatch(service, &call.method, call.params) {
+                    Ok(result) => results.push(BatchResult {
+                        id: call.id,
+                        ok: true,
+                        result: Some(result),
+                        error: None,
+                    }),
+                    Err(error) => results.push(BatchResult {
+                        id: call.id,
+                        ok: false,
+                        result: None,
+                        error: Some(error.to_string()),
+                    }),
+                }
+            }
+            serde_json::to_value(results).map_err(|error| ServiceError::InvalidRequest {
+                reason: error.to_string(),
+            })
+        }
         other => Err(ServiceError::Unsupported {
             reason: format!("unknown resident method {other}"),
         }),

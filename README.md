@@ -40,13 +40,19 @@ whose cursors carry an explicit stream identity. The LSP and MCP implementations
 the `LanguageServiceClient` boundary; an in-process service is retained for
 tests and compatibility when no socket is configured.
 
+Socket framing is newline-delimited JSON, many requests per connection, with
+a `batch` method that runs up to 256 calls in one round trip (each item
+resolves or fails independently).
+
 What works today:
 
 - document lifecycle (open/change/save/close) with unsaved editor buffers overriding disk;
 - **incremental synchronization**: ranged `didChange` edits apply against
   buffer state in order (UTF-16 aware), alongside full-document replacement;
 - authoritative parsing/elaboration/validation through `ReferenceCompiler::front_end`;
-- immutable snapshots bound to exact source identities with correct coarse invalidation;
+- immutable snapshots bound to exact source identities with transitive dependency invalidation;
+- resident workspace indexes (identity, declaration, reference, dependency) so warm cross-document queries are indexed lookups with zero frontend work;
+- transitive dependents/dependencies/callers queries plus machine-readable `service_stats` counters;
 - structured diagnostics preserving codes/stages/severities/spans, plus
   causal `related` entries projected to their owning dependency locations
   (URI, and exact range when the dependency is resident) instead of
