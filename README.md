@@ -1,6 +1,29 @@
 # MNCS Language Service
 
 <!-- MNCS:generated:begin -->
+## Project entry
+
+MNCS Language Service is the resident semantic layer for editors and agents over MNCS workspaces: one resident host compiles sources through mncs-language and serves diagnostics, navigation, and bounded semantic queries through LSP, MCP, and MNCS-native kernels.
+
+```bash
+cargo test --workspace
+```
+
+```bash
+MNLS_WORKSPACE_ROOT=/path/to/mncs/workspace cargo run -p mncs-lsp
+```
+
+Declared capabilities (declarations do not establish execution health):
+
+- `family-agent-context/2` — bounded-authoritative-projection (experimental)
+- `language-tooling/1` — lsp-mcp-service (experimental)
+- `resident-reconcile/1` — resident-lifecycle-recovery (experimental)
+- `resident-status/1` — resident-lifecycle-probe (experimental)
+- `semantic-capsule/1` — bounded-semantic-projection (experimental)
+- `semantic-poll/1` — resident-event-resume (experimental)
+- `semantic-query/1` — bounded-resident-query (experimental)
+
+Semantic sources and ownership: `.mncs/projections.json`.
 <!-- MNCS:generated:end -->
 
 `mncs-language-service` is the resident semantic service for the MNCS language.

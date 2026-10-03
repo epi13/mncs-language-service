@@ -1,0 +1,249 @@
+{
+  "capabilities": [
+    {
+      "contract": "language-tooling",
+      "fingerprint_sources": [
+        "crates/service-core/",
+        "crates/lsp/",
+        "crates/mcp/"
+      ],
+      "kind": "lsp-mcp-service",
+      "stability": "experimental",
+      "version": "1"
+    },
+    {
+      "contract": "family-agent-context",
+      "fingerprint_sources": [
+        "crates/service-core/src/family_context.rs",
+        "docs/family-agent-context.md"
+      ],
+      "kind": "bounded-authoritative-projection",
+      "stability": "experimental",
+      "version": "2"
+    },
+    {
+      "contract": "resident-status",
+      "effects": [
+        "read"
+      ],
+      "fingerprint_sources": [
+        "tools/mnls_provider.py",
+        "crates/service-core/src/ambient.rs"
+      ],
+      "invocation": {
+        "fixed_argv": [
+          "status"
+        ],
+        "kind": "python",
+        "path": "tools/mnls_provider.py"
+      },
+      "kind": "resident-lifecycle-probe",
+      "stability": "experimental",
+      "version": "1"
+    },
+    {
+      "contract": "resident-reconcile",
+      "effects": [
+        "execute"
+      ],
+      "fingerprint_sources": [
+        "tools/mnls_provider.py"
+      ],
+      "invocation": {
+        "fixed_argv": [
+          "ensure"
+        ],
+        "kind": "python",
+        "path": "tools/mnls_provider.py"
+      },
+      "kind": "resident-lifecycle-recovery",
+      "stability": "experimental",
+      "version": "1"
+    },
+    {
+      "contract": "semantic-poll",
+      "effects": [
+        "read"
+      ],
+      "fingerprint_sources": [
+        "tools/mnls_provider.py",
+        "crates/service-core/src/events.rs"
+      ],
+      "invocation": {
+        "fixed_argv": [
+          "poll"
+        ],
+        "kind": "python",
+        "path": "tools/mnls_provider.py"
+      },
+      "kind": "resident-event-resume",
+      "stability": "experimental",
+      "version": "1"
+    },
+    {
+      "contract": "semantic-capsule",
+      "effects": [
+        "read"
+      ],
+      "fingerprint_sources": [
+        "tools/mnls_provider.py",
+        "crates/service-core/src/ambient.rs",
+        "mncs/semantic_capsule.mncs"
+      ],
+      "invocation": {
+        "fixed_argv": [
+          "capsule"
+        ],
+        "kind": "python",
+        "path": "tools/mnls_provider.py"
+      },
+      "kind": "bounded-semantic-projection",
+      "stability": "experimental",
+      "version": "1"
+    },
+    {
+      "contract": "semantic-query",
+      "effects": [
+        "read"
+      ],
+      "fingerprint_sources": [
+        "tools/mnls_provider.py",
+        "crates/service-core/src/client.rs"
+      ],
+      "invocation": {
+        "fixed_argv": [
+          "query"
+        ],
+        "kind": "python",
+        "path": "tools/mnls_provider.py"
+      },
+      "kind": "bounded-resident-query",
+      "stability": "experimental",
+      "version": "1"
+    }
+  ],
+  "dependencies": [
+    {
+      "contract": "mncs-language.semantic-identity",
+      "envelope": {
+        "op": "any"
+      },
+      "evidence_refs": [
+        "README.md"
+      ],
+      "required": true
+    },
+    {
+      "contract": "mncs-language.capability-index",
+      "envelope": {
+        "op": "any"
+      },
+      "required": true
+    },
+    {
+      "contract": "mncs-commons.family-architecture",
+      "envelope": {
+        "op": "any"
+      },
+      "required": true
+    },
+    {
+      "contract": "mncs-commons.pressure-registry",
+      "envelope": {
+        "op": "any"
+      },
+      "required": false
+    }
+  ],
+  "entry": [
+    "cargo test --workspace",
+    "MNLS_WORKSPACE_ROOT=/path/to/mncs/workspace cargo run -p mncs-lsp"
+  ],
+  "purpose": "MNCS Language Service is the resident semantic layer for editors and agents over MNCS workspaces: one resident host compiles sources through mncs-language and serves diagnostics, navigation, and bounded semantic queries through LSP, MCP, and MNCS-native kernels.",
+  "repository": "mncs-language-service",
+  "schema_version": "mncs.project-view/1",
+  "source_identity": "sha256:d325abf0f035af5a98fb182ebcf6e31cc8b1a987a42d11f2b8bf98d9d053b00a",
+  "structure": {
+    "layout": "mncs.repository-layout/1",
+    "surfaces": [
+      {
+        "authority": "mncs-language-service",
+        "class": "canonical",
+        "classification": {
+          "authority": "canonical",
+          "boundary_kind": "none",
+          "lifecycle": "active",
+          "semantic_role": "canonical-semantic"
+        },
+        "path": "crates/service-core/"
+      },
+      {
+        "class": "host-boundary",
+        "classification": {
+          "authority": "none",
+          "boundary_kind": "protocol",
+          "lifecycle": "active",
+          "semantic_role": "platform-adapter"
+        },
+        "note": "LSP transport adapter.",
+        "path": "crates/lsp/"
+      },
+      {
+        "class": "host-boundary",
+        "classification": {
+          "authority": "none",
+          "boundary_kind": "protocol",
+          "lifecycle": "active",
+          "semantic_role": "platform-adapter"
+        },
+        "note": "MCP transport adapter.",
+        "path": "crates/mcp/"
+      },
+      {
+        "class": "canonical",
+        "classification": {
+          "authority": "canonical",
+          "boundary_kind": "protocol",
+          "lifecycle": "active",
+          "semantic_role": "canonical-semantic"
+        },
+        "note": "Bounded family preflight composition; source facts remain externally owned.",
+        "path": "crates/service-core/src/family_context.rs"
+      },
+      {
+        "class": "canonical",
+        "classification": {
+          "authority": "canonical",
+          "boundary_kind": "protocol",
+          "lifecycle": "active",
+          "semantic_role": "canonical-semantic"
+        },
+        "note": "Ambient observation boundary: resident status projection and measured capsule assembly; admission policy stays in MNCS.",
+        "path": "crates/service-core/src/ambient.rs"
+      },
+      {
+        "authority": "mncs-language-service",
+        "class": "canonical",
+        "classification": {
+          "authority": "canonical",
+          "boundary_kind": "none",
+          "lifecycle": "active",
+          "semantic_role": "canonical-semantic"
+        },
+        "note": "Native capsule admission policy: relevance classification, budgets, overflow, completeness.",
+        "path": "mncs/semantic_capsule.mncs"
+      },
+      {
+        "class": "host-boundary",
+        "classification": {
+          "authority": "none",
+          "boundary_kind": "protocol",
+          "lifecycle": "active",
+          "semantic_role": "platform-adapter"
+        },
+        "note": "Provider-owned resident lifecycle transport (status/ensure/stop/poll/capsule/query); no semantic policy.",
+        "path": "tools/"
+      }
+    ]
+  }
+}
