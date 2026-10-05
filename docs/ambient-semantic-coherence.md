@@ -88,8 +88,19 @@ Safety rules (tested in `tools/test_mnls_provider.py`):
   a broader permission change. Status carries that descriptor until a newer
   successful listen attempt supersedes the failed one.
 - `stop` is idempotent and verifies the leased instance before
-  signaling; interrupted starts are adopted only when the live
-  socket reports the same workspace.
+  signaling; the lease binds PID, PID namespace, process start time, and
+  executable bytes, and Linux `pidfd` pins the exact process through exit.
+  Interrupted starts are adopted only when the live socket reports the
+  same workspace and PID.
+- Permission-denied and ambiguous status failures are not dead-socket
+  evidence. `ensure` publishes an operator-action recovery and preserves
+  the socket and lease; only explicit `ECONNREFUSED` or `ENOENT` permits
+  stale-socket cleanup.
+- A lease whose PID namespace is not visible to the current provider, or
+  whose process identity predates the identity-bound lease, is preserved
+  with a `resident-process-identity-unverified` recovery. Environment does
+  not guess that an out-of-namespace PID has exited; status reports its
+  liveness as unknown rather than treating namespace-local `ESRCH` as death.
 - Every probe first reconciles the resident to disk truth through
   `refresh_workspace`: shell-made edits bypass LSP notifications,
   so a probe that only reads resident state would report stale

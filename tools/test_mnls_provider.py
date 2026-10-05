@@ -13,6 +13,10 @@ checkouts outside their temp workspaces.
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import importlib.util
+import io
 import json
 import os
 import shutil
@@ -23,10 +27,15 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 PROVIDER = REPO / "tools" / "mnls_provider.py"
 FIXTURES = REPO / "tests" / "fixtures"
+PROVIDER_SPEC = importlib.util.spec_from_file_location("mnls_provider_under_test", PROVIDER)
+PROVIDER_MODULE = importlib.util.module_from_spec(PROVIDER_SPEC)
+PROVIDER_SPEC.loader.exec_module(PROVIDER_MODULE)
 
 HOST_CANDIDATES = [
     Path(os.environ["MNLS_LANGUAGE_SERVICE_HOST"])
@@ -336,6 +345,302 @@ class ProviderLifecycleTests(unittest.TestCase):
                 "query", "--workspace", str(workspace),
                 "--method", method, env=self.env)
             self.assertEqual(completed.returncode, 2, method)
+
+
+class SocketSafetyTests(unittest.TestCase):
+    def workspace(self) -> Path:
+        root = Path(tempfile.mkdtemp(prefix="mnls-provider-socket-safety-"))
+        (root / ".mncs").mkdir()
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        return root
+
+    def test_permission_denied_socket_is_not_classified_as_dead(self) -> None:
+        workspace = self.workspace()
+        socket_path = PROVIDER_MODULE.socket_path(workspace)
+        socket_path.write_text("socket placeholder")
+        with mock.patch.object(
+            PROVIDER_MODULE, "rpc_call_raw",
+            side_effect=PermissionError(errno.EPERM, "Operation not permitted"),
+        ):
+            state, observed, detail = PROVIDER_MODULE.probe(workspace, 1.0)
+        self.assertEqual(state, "access-denied")
+        self.assertIsNone(observed)
+        self.assertIn("Operation not permitted", detail)
+
+    def test_status_publishes_socket_access_recovery(self) -> None:
+        workspace = self.workspace()
+        detail = "resident socket access denied: [Errno 1] Operation not permitted"
+        PROVIDER_MODULE.write_lease(workspace, {
+            "owned_by_provider": True,
+            "pid": 912345,
+            "process_identity": {"pid_namespace_inode":
+                                 PROVIDER_MODULE.current_pid_namespace_inode() + 1,
+                                 "start_ticks": 10},
+        })
+        with mock.patch.object(
+            PROVIDER_MODULE, "probe",
+            return_value=("access-denied", None, detail),
+        ), mock.patch.object(
+            PROVIDER_MODULE, "language_toolchain", return_value={"digest": "toolchain"},
+        ), mock.patch.object(
+            PROVIDER_MODULE, "selected_host_identity",
+            return_value={"build_fingerprint": "unknown"},
+        ):
+            document = PROVIDER_MODULE.status_document(workspace, 1.0)
+        self.assertEqual(document["state"], "access-denied")
+        self.assertEqual(document["recovery"]["code"], "socket-connect-denied")
+        self.assertFalse(document["recovery"]["automatic_remediation"])
+        self.assertIsNone(document["lease"]["pid_alive"])
+        self.assertEqual(document["lease"]["pid_identity_state"],
+                         "outside-current-pid-namespace")
+
+    def test_pid_permission_denial_means_unknown_live_process(self) -> None:
+        with mock.patch.object(
+            PROVIDER_MODULE.os, "kill",
+            side_effect=PermissionError(errno.EPERM, "Operation not permitted"),
+        ):
+            self.assertTrue(PROVIDER_MODULE.pid_alive(912345))
+
+    def test_current_process_identity_binds_pid_namespace_start_and_bytes(self) -> None:
+        identity = PROVIDER_MODULE.current_process_identity(os.getpid())
+        self.assertIsNotNone(identity)
+        self.assertEqual(identity["pid"], os.getpid())
+        self.assertGreater(identity["pid_namespace_inode"], 0)
+        self.assertGreater(identity["start_ticks"], 0)
+        self.assertRegex(identity["executable_sha256"], r"^sha256:[0-9a-f]{64}$")
+
+    def test_ensure_refuses_before_touching_access_denied_resident(self) -> None:
+        workspace = self.workspace()
+        socket_path = PROVIDER_MODULE.socket_path(workspace)
+        socket_path.write_text("socket placeholder")
+        lease = PROVIDER_MODULE.lease_path(workspace)
+        lease.write_text('{"owned_by_provider": true}')
+        args = SimpleNamespace(workspace=str(workspace), repository_roots_json=None,
+                               timeout=1.0, start_timeout=1.0)
+        output = io.StringIO()
+        with mock.patch.object(
+            PROVIDER_MODULE, "probe",
+            return_value=("access-denied", None,
+                          "resident socket access denied: [Errno 1] Operation not permitted"),
+        ), mock.patch.object(
+            PROVIDER_MODULE, "host_command",
+            side_effect=AssertionError("a denied resident must not be restarted"),
+        ), contextlib.redirect_stdout(output):
+            code = PROVIDER_MODULE.cmd_ensure(args)
+        report = json.loads(output.getvalue())
+        self.assertEqual(code, 3)
+        self.assertEqual(report["state"], "refused")
+        self.assertEqual(report["recovery"]["code"], "socket-connect-denied")
+        self.assertTrue(socket_path.exists())
+        self.assertTrue(lease.exists())
+
+    def test_ensure_refuses_ambiguous_resident_without_unlink_or_restart(self) -> None:
+        workspace = self.workspace()
+        socket_path = PROVIDER_MODULE.socket_path(workspace)
+        socket_path.write_text("socket placeholder")
+        lease = PROVIDER_MODULE.lease_path(workspace)
+        lease.write_text('{"owned_by_provider": true}')
+        args = SimpleNamespace(workspace=str(workspace), repository_roots_json=None,
+                               timeout=1.0, start_timeout=1.0)
+        output = io.StringIO()
+        with mock.patch.object(
+            PROVIDER_MODULE, "probe",
+            return_value=("unverified", None, "resident status timed out"),
+        ), mock.patch.object(
+            PROVIDER_MODULE, "host_command",
+            side_effect=AssertionError("an ambiguous resident must not be restarted"),
+        ), contextlib.redirect_stdout(output):
+            code = PROVIDER_MODULE.cmd_ensure(args)
+        report = json.loads(output.getvalue())
+        self.assertEqual(code, 3)
+        self.assertEqual(report["recovery"]["code"], "resident-state-unverified")
+        self.assertTrue(socket_path.exists())
+        self.assertTrue(lease.exists())
+
+    def test_probe_does_not_call_ambiguous_rpc_failure_a_dead_socket(self) -> None:
+        workspace = self.workspace()
+        socket_path = PROVIDER_MODULE.socket_path(workspace)
+        socket_path.write_text("socket placeholder")
+        with mock.patch.object(
+            PROVIDER_MODULE, "rpc_call_raw", return_value={"ok": True, "result": {}}
+        ), mock.patch.object(
+            PROVIDER_MODULE, "rpc_call",
+            side_effect=TimeoutError("status timeout"),
+        ):
+            state, observed, detail = PROVIDER_MODULE.probe(workspace, 1.0)
+        self.assertEqual(state, "unverified")
+        self.assertIsNone(observed)
+        self.assertIn("status timeout", detail)
+
+    def test_stop_preserves_lease_when_pid_is_outside_namespace_and_access_denied(self) -> None:
+        workspace = self.workspace()
+        socket_path = PROVIDER_MODULE.socket_path(workspace)
+        socket_path.write_text("socket placeholder")
+        lease_path = PROVIDER_MODULE.lease_path(workspace)
+        lease_path.write_text("lease placeholder")
+        lease = {"owned_by_provider": True, "workspace_root": str(workspace),
+                 "pid": 912345, "instance_id": "resident-1",
+                 "process_identity": {"pid_namespace_inode":
+                                      PROVIDER_MODULE.current_pid_namespace_inode()}}
+        with mock.patch.object(PROVIDER_MODULE, "pid_alive", return_value=False), mock.patch.object(
+            PROVIDER_MODULE, "rpc_call",
+            side_effect=PermissionError(errno.EPERM, "Operation not permitted"),
+        ):
+            result = PROVIDER_MODULE.terminate_owned(workspace, lease, 1.0)
+        self.assertEqual(result["state"], "refused")
+        self.assertIn("cannot establish whether", result["detail"])
+        self.assertTrue(socket_path.exists())
+        self.assertTrue(lease_path.exists())
+
+    def test_stop_preserves_foreign_namespace_lease_even_for_refused_socket(self) -> None:
+        workspace = self.workspace()
+        socket_path = PROVIDER_MODULE.socket_path(workspace)
+        socket_path.write_text("socket placeholder")
+        lease_path = PROVIDER_MODULE.lease_path(workspace)
+        lease_path.write_text("lease placeholder")
+        lease = {"owned_by_provider": True, "workspace_root": str(workspace),
+                 "pid": 912345, "instance_id": "resident-1",
+                 "process_identity": {"pid_namespace_inode": 1}}
+        with mock.patch.object(PROVIDER_MODULE, "pid_alive", return_value=False), mock.patch.object(
+            PROVIDER_MODULE, "rpc_call",
+            side_effect=ConnectionRefusedError(errno.ECONNREFUSED, "refused"),
+        ):
+            result = PROVIDER_MODULE.terminate_owned(workspace, lease, 1.0)
+        self.assertEqual(result["state"], "refused")
+        self.assertIn("process namespace", result["detail"])
+        self.assertEqual(result["recovery"]["code"],
+                         "resident-process-identity-unverified")
+        self.assertTrue(socket_path.exists())
+        self.assertTrue(lease_path.exists())
+
+    def test_stop_refuses_legacy_lease_without_process_identity(self) -> None:
+        workspace = self.workspace()
+        lease_path = PROVIDER_MODULE.lease_path(workspace)
+        lease_path.write_text("legacy lease placeholder")
+        lease = {"owned_by_provider": True, "workspace_root": str(workspace),
+                 "pid": 912345, "instance_id": "resident-1"}
+        with mock.patch.object(PROVIDER_MODULE, "pid_alive", return_value=False):
+            result = PROVIDER_MODULE.terminate_owned(workspace, lease, 1.0)
+        self.assertEqual(result["state"], "refused")
+        self.assertTrue(lease_path.exists())
+
+    def test_stop_does_not_signal_pid_with_mismatched_process_identity(self) -> None:
+        workspace = self.workspace()
+        socket_path = PROVIDER_MODULE.socket_path(workspace)
+        socket_path.write_text("socket placeholder")
+        lease_path = PROVIDER_MODULE.lease_path(workspace)
+        lease_path.write_text("lease placeholder")
+        lease = {
+            "owned_by_provider": True,
+            "workspace_root": str(workspace),
+            "pid": 912345,
+            "instance_id": "resident-1",
+            "process_identity": {
+                "pid": 912345,
+                "pid_namespace_inode": 4,
+                "start_ticks": 10,
+                "executable_sha256": "sha256:old",
+            },
+        }
+        current = {
+            "pid": 912345,
+            "pid_namespace_inode": 4,
+            "start_ticks": 11,
+            "executable_sha256": "sha256:new",
+        }
+        with mock.patch.object(PROVIDER_MODULE, "pid_alive", return_value=True), mock.patch.object(
+            PROVIDER_MODULE.os, "pidfd_open", return_value=63,
+        ), mock.patch.object(
+            PROVIDER_MODULE, "current_process_identity", return_value=current,
+        ), mock.patch.object(PROVIDER_MODULE.os, "close"), mock.patch.object(
+            PROVIDER_MODULE.signal, "pidfd_send_signal",
+        ) as send_signal:
+            result = PROVIDER_MODULE.terminate_owned(workspace, lease, 1.0)
+        self.assertEqual(result["state"], "refused")
+        send_signal.assert_not_called()
+        self.assertTrue(socket_path.exists())
+        self.assertTrue(lease_path.exists())
+
+    def test_stop_live_resident_with_denied_socket_preserves_owned_state(self) -> None:
+        workspace = self.workspace()
+        socket_path = PROVIDER_MODULE.socket_path(workspace)
+        socket_path.write_text("socket placeholder")
+        lease_path = PROVIDER_MODULE.lease_path(workspace)
+        lease_path.write_text("lease placeholder")
+        identity = {
+            "pid": 912345,
+            "pid_namespace_inode": 4,
+            "start_ticks": 10,
+            "executable_sha256": "sha256:current",
+        }
+        lease = {"owned_by_provider": True, "workspace_root": str(workspace),
+                 "pid": 912345, "instance_id": "resident-1",
+                 "process_identity": identity}
+        with mock.patch.object(PROVIDER_MODULE, "pid_alive", return_value=True), mock.patch.object(
+            PROVIDER_MODULE.os, "pidfd_open", return_value=64,
+        ), mock.patch.object(
+            PROVIDER_MODULE, "current_process_identity", return_value=identity,
+        ), mock.patch.object(
+            PROVIDER_MODULE, "rpc_call",
+            side_effect=PermissionError(errno.EPERM, "Operation not permitted"),
+        ), mock.patch.object(PROVIDER_MODULE.os, "close"), mock.patch.object(
+            PROVIDER_MODULE.signal, "pidfd_send_signal",
+        ) as send_signal:
+            result = PROVIDER_MODULE.terminate_owned(workspace, lease, 1.0)
+        self.assertEqual(result["state"], "refused")
+        send_signal.assert_not_called()
+        self.assertTrue(socket_path.exists())
+        self.assertTrue(lease_path.exists())
+
+    def test_stop_pins_verified_process_and_reclaims_lease_after_exit(self) -> None:
+        workspace = self.workspace()
+        socket_path = PROVIDER_MODULE.socket_path(workspace)
+        socket_path.write_text("socket placeholder")
+        lease_path = PROVIDER_MODULE.lease_path(workspace)
+        lease_path.write_text("lease placeholder")
+        identity = {
+            "pid": 912345,
+            "pid_namespace_inode": 4,
+            "start_ticks": 10,
+            "executable_sha256": "sha256:current",
+        }
+        lease = {"owned_by_provider": True, "workspace_root": str(workspace),
+                 "pid": 912345, "instance_id": "resident-1",
+                 "process_identity": identity}
+        observed = {"workspace_root": str(workspace),
+                    "service": {"pid": 912345, "instance_id": "resident-1"}}
+        with mock.patch.object(PROVIDER_MODULE, "pid_alive", return_value=True), mock.patch.object(
+            PROVIDER_MODULE.os, "pidfd_open", return_value=65,
+        ), mock.patch.object(
+            PROVIDER_MODULE, "current_process_identity", return_value=identity,
+        ), mock.patch.object(
+            PROVIDER_MODULE, "rpc_call", return_value=observed,
+        ), mock.patch.object(PROVIDER_MODULE, "pidfd_exited", return_value=True), mock.patch.object(
+            PROVIDER_MODULE.os, "close",
+        ), mock.patch.object(PROVIDER_MODULE.signal, "pidfd_send_signal") as send_signal:
+            result = PROVIDER_MODULE.terminate_owned(workspace, lease, 1.0)
+        self.assertEqual(result["state"], "stopped")
+        send_signal.assert_called_once_with(65, PROVIDER_MODULE.signal.SIGTERM)
+        self.assertFalse(socket_path.exists())
+        self.assertFalse(lease_path.exists())
+
+    def test_stop_reclaims_only_explicitly_refused_stale_socket(self) -> None:
+        workspace = self.workspace()
+        socket_path = PROVIDER_MODULE.socket_path(workspace)
+        socket_path.write_text("stale socket placeholder")
+        lease_path = PROVIDER_MODULE.lease_path(workspace)
+        lease_path.write_text("stale lease placeholder")
+        lease = {"owned_by_provider": True, "workspace_root": str(workspace),
+                 "pid": 912345, "instance_id": "resident-1",
+                 "process_identity": {"pid_namespace_inode":
+                                      PROVIDER_MODULE.current_pid_namespace_inode()}}
+        with mock.patch.object(PROVIDER_MODULE, "pid_alive", return_value=False), mock.patch.object(
+            PROVIDER_MODULE, "rpc_call", side_effect=ConnectionRefusedError(errno.ECONNREFUSED, "refused"),
+        ):
+            result = PROVIDER_MODULE.terminate_owned(workspace, lease, 1.0)
+        self.assertEqual(result["state"], "stopped")
+        self.assertFalse(socket_path.exists())
+        self.assertFalse(lease_path.exists())
 
 
 if __name__ == "__main__":

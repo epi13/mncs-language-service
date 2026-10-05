@@ -21,9 +21,11 @@ failed or timed out; 5 host binary unavailable; 6 resident RPC error.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
+import select
 import shlex
 import signal
 import socket
@@ -175,9 +177,77 @@ def pid_alive(pid: int) -> bool:
         return False
     try:
         os.kill(pid, 0)
-    except OSError:
-        return False
+    except OSError as error:
+        # A denied signal probe means the PID exists but this process cannot
+        # inspect or control it. Treating it as dead could unlink its lease.
+        return error.errno in (errno.EPERM, errno.EACCES)
     return True
+
+
+def current_process_identity(pid: int) -> dict | None:
+    """Bind a lease PID to namespace, start time, and exact executable bytes."""
+    proc = Path("/proc") / str(pid)
+    try:
+        raw_stat = (proc / "stat").read_text()
+        close = raw_stat.rfind(")")
+        fields = raw_stat[close + 1:].split()
+        start_ticks = int(fields[19])
+        pid_namespace = (proc / "ns/pid").stat().st_ino
+        executable = os.readlink(proc / "exe")
+        digest = hashlib.sha256()
+        with (proc / "exe").open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    except (OSError, IndexError, ValueError):
+        return None
+    return {
+        "pid": pid,
+        "pid_namespace_inode": pid_namespace,
+        "start_ticks": start_ticks,
+        "executable": executable,
+        "executable_sha256": f"sha256:{digest.hexdigest()}",
+    }
+
+
+def pidfd_exited(pidfd: int, timeout: float) -> bool:
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+    return bool(poller.poll(max(1, int(timeout * 1000))))
+
+
+def current_pid_namespace_inode() -> int | None:
+    try:
+        return (Path("/proc/self/ns/pid").stat().st_ino)
+    except OSError:
+        return None
+
+
+def lease_process_liveness(lease: dict | None) -> tuple[bool | None, str]:
+    if not isinstance(lease, dict):
+        return False, "no-lease"
+    pid = lease.get("pid")
+    identity = lease.get("process_identity")
+    if not isinstance(pid, int) or pid <= 0:
+        return False, "no-leased-pid"
+    if not isinstance(identity, dict):
+        return None, "process-identity-unrecorded"
+    current_namespace = current_pid_namespace_inode()
+    leased_namespace = identity.get("pid_namespace_inode")
+    if current_namespace is None:
+        return None, "current-pid-namespace-unavailable"
+    if leased_namespace != current_namespace:
+        return None, "outside-current-pid-namespace"
+    if not pid_alive(pid):
+        return False, "pid-not-live"
+    try:
+        raw_stat = (Path("/proc") / str(pid) / "stat").read_text()
+        fields = raw_stat[raw_stat.rfind(")") + 1:].split()
+        start_ticks = int(fields[19])
+    except (OSError, IndexError, ValueError):
+        return None, "pid-identity-unreadable"
+    if identity.get("start_ticks") != start_ticks:
+        return False, "pid-reused-or-replaced"
+    return True, "same-process-instance"
 
 
 def host_command() -> list[str]:
@@ -240,6 +310,46 @@ def startup_recovery(detail: str, socket: Path) -> dict | None:
         "socket_path": str(socket),
         "automatic_remediation": False,
         "action": action,
+    }
+
+
+def socket_access_recovery(detail: str, socket: Path) -> dict:
+    return {
+        "schema_version": "mncs.language-service.recovery/1",
+        "disposition": "operator-action-required",
+        "code": "socket-connect-denied",
+        "socket_path": str(socket),
+        "automatic_remediation": False,
+        "action": ("Run status/reconcile from a process context allowed to connect to the "
+                   "selected AF_UNIX socket. Preserve the lease and socket until the "
+                   "resident identity can be verified."),
+        "detail": detail[-1000:],
+    }
+
+
+def socket_unverified_recovery(detail: str, socket: Path) -> dict:
+    return {
+        "schema_version": "mncs.language-service.recovery/1",
+        "disposition": "operator-action-required",
+        "code": "resident-state-unverified",
+        "socket_path": str(socket),
+        "automatic_remediation": False,
+        "action": ("Verify the resident and socket from an allowed process context. "
+                   "Do not remove the lease or socket until the resident is proven stale."),
+        "detail": detail[-1000:],
+    }
+
+
+def process_identity_recovery(detail: str, socket: Path) -> dict:
+    return {
+        "schema_version": "mncs.language-service.recovery/1",
+        "disposition": "operator-action-required",
+        "code": "resident-process-identity-unverified",
+        "socket_path": str(socket),
+        "automatic_remediation": False,
+        "action": ("Verify the provider-owned resident from its PID namespace, then "
+                   "reconcile its socket and lease without signaling an unverified PID."),
+        "detail": detail[-1000:],
     }
 
 
@@ -397,8 +507,17 @@ def probe(workspace: Path, timeout: float, repository_roots: list[Path] | None =
         pass
     try:
         observed = rpc_call(sock, "service_status", {}, timeout)
-    except (OSError, RuntimeError) as error:
-        return ("unreachable", None, f"resident socket did not answer: {error}")
+    except OSError as error:
+        if error.errno in (errno.EPERM, errno.EACCES):
+            return ("access-denied", None,
+                    f"resident socket access denied: {error}")
+        if error.errno in (errno.ECONNREFUSED, errno.ENOENT):
+            return ("unreachable", None, f"resident socket did not answer: {error}")
+        return ("unverified", None,
+                f"resident status could not be verified safely: {error}")
+    except RuntimeError as error:
+        return ("unverified", None,
+                f"resident status returned an invalid or refused response: {error}")
     reported = observed.get("workspace_root")
     if not isinstance(reported, str):
         return ("foreign", observed, "resident reports no workspace root")
@@ -441,6 +560,7 @@ def status_document(workspace: Path, timeout: float, repository_roots: list[Path
     measured = language_toolchain()
     selected_host = selected_host_identity()
     lease = read_lease(workspace)
+    leased_pid_alive, lease_pid_state = lease_process_liveness(lease)
     document: dict = {
         "schema_version": STATUS_SCHEMA,
         "ready": state == "ready",
@@ -459,15 +579,21 @@ def status_document(workspace: Path, timeout: float, repository_roots: list[Path
             "present": lease is not None,
             "owned": bool(isinstance(lease, dict) and lease.get("owned_by_provider")),
             "pid": lease.get("pid") if isinstance(lease, dict) else None,
-            "pid_alive": pid_alive(int(lease.get("pid") or 0)) if isinstance(lease, dict) else False,
+            "pid_alive": leased_pid_alive,
+            "pid_identity_state": lease_pid_state,
         },
     }
     if state != "ready":
-        host_log = recent_host_log(workspace)
-        recovery = startup_recovery(host_log, socket_path(workspace))
-        if recovery is not None:
-            document["detail"] = f"{detail}; last host startup: {host_log[-1000:]}"
-            document["recovery"] = recovery
+        if state == "access-denied":
+            document["recovery"] = socket_access_recovery(detail, socket_path(workspace))
+        elif state == "unverified":
+            document["recovery"] = socket_unverified_recovery(detail, socket_path(workspace))
+        else:
+            host_log = recent_host_log(workspace)
+            recovery = startup_recovery(host_log, socket_path(workspace))
+            if recovery is not None:
+                document["detail"] = f"{detail}; last host startup: {host_log[-1000:]}"
+                document["recovery"] = recovery
     if observed is not None:
         service = observed.get("service", {}) if isinstance(observed, dict) else {}
         diagnostics = observed.get("diagnostics", {}) if isinstance(observed, dict) else {}
@@ -520,36 +646,59 @@ def terminate_owned(workspace: Path, lease: dict | None, timeout: float) -> dict
         return {"state": "refused", "detail": "lease names a different workspace"}
     pid = lease.get("pid")
     pid = int(pid) if isinstance(pid, int) and pid > 0 else 0
-    if pid and pid_alive(pid):
-        # Confirm the live socket belongs to the leased instance before
-        # signaling; a foreign host on our path is never killed. A lease
-        # without an instance id (interrupted start) is adopted only when
-        # the live socket reports this exact workspace.
+    live_pid = bool(pid and pid_alive(pid))
+    if live_pid:
+        if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+            detail = "this runtime cannot pin the leased process identity safely"
+            return {"state": "refused", "detail": detail,
+                    "recovery": process_identity_recovery(detail, sock)}
+        try:
+            pidfd = os.pidfd_open(pid, 0)
+        except OSError as error:
+            detail = f"cannot pin the leased resident process: {error}"
+            return {"state": "refused", "detail": detail,
+                    "recovery": process_identity_recovery(detail, sock)}
+        try:
+            result = _terminate_pinned_owned(workspace, lease, pid, pidfd, timeout)
+            if result["state"] != "stopped":
+                return result
+        finally:
+            os.close(pidfd)
+    elif pid:
+        process_identity = lease.get("process_identity")
+        current_namespace = current_pid_namespace_inode()
+        if (not isinstance(process_identity, dict)
+                or process_identity.get("pid_namespace_inode") is None
+                or current_namespace is None
+                or process_identity.get("pid_namespace_inode") != current_namespace):
+            detail = ("cannot prove the leased PID is gone from this process namespace; "
+                      "preserving its lease and socket")
+            return {"state": "refused", "detail": detail,
+                    "recovery": process_identity_recovery(detail, sock)}
+    if not live_pid and sock.exists():
+        # A PID outside this process namespace can look dead here. Only an
+        # explicit connection-refused/missing-path result proves that an
+        # existing socket no longer has a listener; access denial or an
+        # unrecognized response must preserve both lease and socket.
         try:
             observed = rpc_call(sock, "service_status", {}, timeout)
-            service = observed.get("service", {})
-            if lease.get("instance_id") is None:
-                reported = observed.get("workspace_root")
-                if not isinstance(reported, str) or Path(reported).resolve() != workspace:
-                    return {"state": "refused",
-                            "detail": "live resident does not report this workspace"}
-            elif service.get("instance_id") != lease.get("instance_id"):
+        except OSError as error:
+            if error.errno not in (errno.ECONNREFUSED, errno.ENOENT):
                 return {"state": "refused",
-                        "detail": "live resident instance does not match the owned lease"}
-        except (OSError, RuntimeError):
-            pass
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and pid_alive(pid):
-            time.sleep(0.05)
-        if pid_alive(pid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+                        "detail": f"cannot establish whether the leased resident is alive: {error}"}
+        except RuntimeError as error:
+            return {"state": "refused",
+                    "detail": f"cannot establish whether the leased resident is alive: {error}"}
+        else:
+            service = observed.get("service", {})
+            reported = observed.get("workspace_root")
+            if (not isinstance(reported, str) or Path(reported).resolve() != workspace
+                    or (lease.get("instance_id") is not None
+                        and service.get("instance_id") != lease.get("instance_id"))):
+                return {"state": "refused",
+                        "detail": "socket belongs to a different or unverifiable resident"}
+            return {"state": "refused",
+                    "detail": "resident is reachable but its PID is outside this process namespace"}
     try:
         sock.unlink(missing_ok=True)
     except OSError:
@@ -559,6 +708,56 @@ def terminate_owned(workspace: Path, lease: dict | None, timeout: float) -> dict
     except OSError:
         pass
     return {"state": "stopped", "detail": "provider-owned lease stopped"}
+
+
+def _terminate_pinned_owned(workspace: Path, lease: dict, pid: int,
+                             pidfd: int, timeout: float) -> dict:
+    sock = socket_path(workspace)
+    leased_process = lease.get("process_identity")
+    observed_process = current_process_identity(pid)
+    if (not isinstance(leased_process, dict) or observed_process is None
+            or any(leased_process.get(key) != observed_process.get(key)
+                   for key in ("pid", "pid_namespace_inode", "start_ticks",
+                               "executable_sha256"))):
+        detail = "provider lease does not match the current PID namespace, start time, and executable bytes"
+        return {"state": "refused", "detail": detail,
+                "recovery": process_identity_recovery(detail, sock)}
+    # Confirm the live socket belongs to the leased instance before
+    # signaling; a foreign host on our path is never killed. A lease
+    # without an instance id (interrupted start) is adopted only when
+    # the live socket reports this exact workspace and PID.
+    try:
+        observed = rpc_call(sock, "service_status", {}, timeout)
+        service = observed.get("service", {})
+        reported = observed.get("workspace_root")
+        if not isinstance(reported, str) or Path(reported).resolve() != workspace:
+            return {"state": "refused",
+                    "detail": "resident does not report the leased workspace"}
+        if service.get("pid") != pid:
+            return {"state": "refused",
+                    "detail": "resident process ID does not match the provider lease"}
+        if (lease.get("instance_id") is not None
+                and service.get("instance_id") != lease.get("instance_id")):
+            return {"state": "refused",
+                    "detail": "live resident instance does not match the owned lease"}
+    except (OSError, RuntimeError) as error:
+        return {"state": "refused",
+                "detail": f"cannot verify the owned resident before stopping it: {error}"}
+    try:
+        signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+    except OSError as error:
+        return {"state": "refused",
+                "detail": f"cannot signal the verified resident process: {error}"}
+    if not pidfd_exited(pidfd, 5.0):
+        try:
+            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+        except OSError as error:
+            return {"state": "refused",
+                    "detail": f"verified resident did not stop and cannot be killed safely: {error}"}
+        if not pidfd_exited(pidfd, 1.0):
+            return {"state": "refused",
+                    "detail": "leased resident did not exit; preserving its socket and lease"}
+    return {"state": "stopped", "detail": "verified provider-owned resident exited"}
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
@@ -586,6 +785,16 @@ def cmd_ensure(args: argparse.Namespace) -> int:
     if state == "foreign":
         print(json.dumps({"state": "refused", "detail": detail},
                          indent=2, sort_keys=True))
+        return 3
+    if state == "access-denied":
+        result = {"state": "refused", "detail": detail,
+                  "recovery": socket_access_recovery(detail, socket_path(workspace))}
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 3
+    if state == "unverified":
+        result = {"state": "refused", "detail": detail,
+                  "recovery": socket_unverified_recovery(detail, socket_path(workspace))}
+        print(json.dumps(result, indent=2, sort_keys=True))
         return 3
     if state == "build-unverified":
         print(json.dumps({
@@ -677,6 +886,7 @@ def cmd_ensure(args: argparse.Namespace) -> int:
         "schema_version": LEASE_SCHEMA,
         "owned_by_provider": True,
         "pid": process.pid,
+        "process_identity": current_process_identity(process.pid),
         "instance_id": None,
         "workspace_root": str(workspace),
         "repository_roots": [str(path) for path in roots],
