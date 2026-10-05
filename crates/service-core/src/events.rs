@@ -225,7 +225,13 @@ impl EventHub {
             .front()
             .map(|event| event.cursor)
             .unwrap_or_else(|| state.next_cursor.saturating_add(1));
+        // A durable consumer cursor can also be ahead of this stream after
+        // restoring an older service snapshot. Do not return an empty page
+        // that looks current: it must reconcile against the provider's exact
+        // high-water mark before adopting this stream again.
+        let cursor_out_of_range = after_cursor > state.next_cursor;
         let reset_required = stream_mismatch
+            || cursor_out_of_range
             || (after_cursor.saturating_add(1) < oldest_cursor && after_cursor < state.next_cursor);
         let events = if reset_required {
             Vec::new()
@@ -252,6 +258,12 @@ impl EventHub {
                 "a nonzero cursor requires its Language Service event-stream identity".to_owned()
             });
         }
+        if cursor_out_of_range {
+            limitations.push(format!(
+                "requested cursor {after_cursor} is ahead of stream high-water {}",
+                state.next_cursor
+            ));
+        }
         WorkspaceEventCursor {
             schema_version: WORKSPACE_EVENT_CURSOR_SCHEMA_VERSION.to_owned(),
             stream_identity: state.stream_identity.clone(),
@@ -271,6 +283,102 @@ fn new_stream_identity() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     format!("mnls-stream-{}-{nanos}", std::process::id())
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    fn event() -> WorkspaceChangeEvent {
+        WorkspaceChangeEvent {
+            schema_version: WORKSPACE_CHANGE_SCHEMA_VERSION.to_owned(),
+            stream_identity: String::new(),
+            cursor: 0,
+            replaced_generation: 0,
+            current_generation: 1,
+            current: SourceIdentity {
+                uri: "file:///workspace/example.mncs".to_owned(),
+                identity: "mncs:source:example".to_owned(),
+            },
+            affected_documents: Vec::new(),
+            semantic_subjects: Vec::new(),
+            diagnostics: DiagnosticDelta::default(),
+            obligations: WorkspaceObligationDelta::default(),
+            impact_identity: None,
+            impact: None,
+            impact_complete: false,
+            reconciled: false,
+            limitations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn expired_cursor_fails_closed_and_reports_replay_window() {
+        let hub = EventHub::new_with_stream(2, "stream-one".to_owned());
+        hub.push(event());
+        hub.push(event());
+        hub.push(event());
+
+        let expired = hub.poll_for(Some("stream-one"), 0, 8);
+        assert!(expired.reset_required);
+        assert_eq!(expired.stream_identity, "stream-one");
+        assert_eq!(expired.current_cursor, 3);
+        assert_eq!(expired.oldest_cursor, 2);
+        assert!(expired.events.is_empty());
+
+        let retained = hub.poll_for(Some("stream-one"), 1, 8);
+        assert!(!retained.reset_required);
+        assert_eq!(
+            retained
+                .events
+                .iter()
+                .map(|item| item.cursor)
+                .collect::<Vec<_>>(),
+            [2, 3]
+        );
+    }
+
+    #[test]
+    fn restored_stream_keeps_identity_and_requires_reconciliation_for_lost_history() {
+        let hub = EventHub::new_with_stream(2, "temporary".to_owned());
+        hub.restore_stream("stream-restored".to_owned(), 10);
+
+        let expired = hub.poll_for(Some("stream-restored"), 8, 8);
+        assert!(expired.reset_required);
+        assert_eq!(expired.current_cursor, 10);
+        assert_eq!(expired.oldest_cursor, 11);
+        let at_tip = hub.poll_for(Some("stream-restored"), 10, 8);
+        assert!(!at_tip.reset_required);
+        assert!(at_tip.events.is_empty());
+    }
+
+    #[test]
+    fn a_new_stream_never_relabels_an_old_cursor() {
+        let hub = EventHub::new_with_stream(2, "stream-two".to_owned());
+        hub.push(event());
+
+        let reset = hub.poll_for(Some("stream-one"), 9, 8);
+        assert!(reset.reset_required);
+        assert_eq!(reset.stream_identity, "stream-two");
+        assert_eq!(reset.current_cursor, 1);
+        assert!(reset.events.is_empty());
+    }
+
+    #[test]
+    fn a_cursor_ahead_of_restored_stream_requires_reconciliation() {
+        let hub = EventHub::new_with_stream(4, "stream-restored".to_owned());
+        hub.push(event());
+
+        let reset = hub.poll_for(Some("stream-restored"), 7, 8);
+        assert!(reset.reset_required);
+        assert_eq!(reset.stream_identity, "stream-restored");
+        assert_eq!(reset.current_cursor, 1);
+        assert!(reset.events.is_empty());
+        assert!(reset
+            .limitations
+            .iter()
+            .any(|value| value.contains("ahead of stream high-water 1")));
+    }
 }
 
 fn diagnostic_codes(analysis: Option<&DocumentAnalysis>) -> BTreeSet<String> {

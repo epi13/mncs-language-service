@@ -30,7 +30,11 @@ const MANIFEST_VALIDATION_SCHEMA: &str = "mncs.standard.repository-manifest-vali
 const OBLIGATION_INVENTORY_SCHEMA: &str = "mncs-family.verification-obligation-inventory/v1";
 const MAX_CONTEXT_ITEMS: usize = 32;
 const LANGUAGE_AUTHORITY_ITEMS: usize = 256;
-const AUTHORITY_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
+// Commons validates and natively folds the complete pressure registry before
+// returning its bounded repository slice.  The measured warm query is about
+// 10.5 seconds in the selected workspace; keep this a strict bound with room
+// for scheduling variance instead of timing out a valid authority response.
+const AUTHORITY_QUERY_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_AUTHORITY_OUTPUT: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

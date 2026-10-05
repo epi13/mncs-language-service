@@ -96,9 +96,10 @@ pub fn discover_stdlib_root() -> Option<PathBuf> {
     None
 }
 
-/// `(module name, minimum profile)` pairs from the discovered stdlib
-/// manifest, best-effort: an absent or unreadable manifest yields no
-/// names rather than an error, so completion degrades to local symbols.
+/// `(module name, required profile)` pairs from the discovered stdlib
+/// manifest, best-effort: an absent, unreadable, or wrong-schema manifest
+/// yields no names rather than an error, so completion degrades to local
+/// symbols.
 pub fn stdlib_manifest_modules() -> Vec<(String, String)> {
     let Some(root) = discover_stdlib_root() else {
         return Vec::new();
@@ -109,6 +110,9 @@ pub fn stdlib_manifest_modules() -> Vec<(String, String)> {
     let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Vec::new();
     };
+    if manifest.get("schema_version").and_then(|v| v.as_str()) != Some("mncs.stdlib-manifest/1") {
+        return Vec::new();
+    }
     manifest
         .get("modules")
         .and_then(serde_json::Value::as_array)
@@ -117,13 +121,12 @@ pub fn stdlib_manifest_modules() -> Vec<(String, String)> {
                 .iter()
                 .filter_map(|entry| {
                     let name = entry.get("name")?.as_str()?.to_owned();
-                    let min = entry
-                        .get("requires_profile")
-                        .and_then(|profile| profile.get("min"))
+                    let profile = entry
+                        .get("profile")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("?")
                         .to_owned();
-                    Some((name, min))
+                    Some((name, profile))
                 })
                 .collect()
         })

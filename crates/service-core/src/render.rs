@@ -468,10 +468,10 @@ fn module_completions(prefix: &str) -> Vec<CompletionCandidate> {
     crate::modules::stdlib_manifest_modules()
         .into_iter()
         .filter(|(name, _)| name.starts_with(prefix))
-        .map(|(name, min)| CompletionCandidate {
+        .map(|(name, profile)| CompletionCandidate {
             label: name,
             class: CompletionClass::Module,
-            detail: Some(format!("stdlib (profile {min}+)")),
+            detail: Some(format!("stdlib (profile {profile})")),
         })
         .collect()
 }
