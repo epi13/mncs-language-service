@@ -10,8 +10,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[path = "common/fixture_workspace.rs"]
+mod fixture_workspace;
+
 fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
+    fixture_workspace::root("../../tests/fixtures")
 }
 
 fn stdlib_library() -> PathBuf {
@@ -55,6 +58,7 @@ fn workspace_status_reports_documents_and_readiness() {
         .find(|document| document.uri.ends_with(CONTRACTS))
         .expect("fixture present");
     assert!(!entry.open);
+    assert!(fixtures_dir().starts_with(std::env::temp_dir()));
 }
 
 #[test]

@@ -5,8 +5,11 @@
 use mncs_service_core::{LanguageService, ResponseStatus};
 use std::path::PathBuf;
 
+#[path = "common/fixture_workspace.rs"]
+mod fixture_workspace;
+
 fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
+    fixture_workspace::root("../../tests/fixtures")
 }
 
 fn fixture_uri(name: &str) -> String {
