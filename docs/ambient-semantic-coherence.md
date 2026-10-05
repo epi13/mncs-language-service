@@ -76,7 +76,10 @@ Safety rules (tested in `tools/test_mnls_provider.py`):
   canonical workspace root. A foreign host is reported, refused,
   and never killed.
 - `ensure` restarts only provider-owned leases, and only when the
-  resident toolchain binding drifted or the socket is dead.
+  resident toolchain, selected repository roots, or exact executable
+  content identity drifted, or the socket is dead. An unreadable selected
+  executable is reported as unverified and never justifies automatic
+  restart.
 - A missing host binary reports `host-unavailable` with an exact
   build hint instead of guessing.
 - `stop` is idempotent and verifies the leased instance before
@@ -99,7 +102,10 @@ Resident state binds to all of:
   live under `<root>/.mncs/`);
 - toolchain binding (`MNCS_LANGUAGE_ROOT`, `MNCS_LIBRARY_PATH`,
   `MNLS_TOOLCHAIN_IDENTITY` pin), digested and echoed by the host;
-- service build fingerprint (version + executable path + mtime);
+- selected host executable SHA-256 and the resident process's SHA-256 of
+  its loaded executable image (on Linux read through `/proc/self/exe`).
+  Paths are reported for location and diagnostics, never used as build
+  identity; an unreadable image is `unknown`, not a fabricated receipt;
 - process instance id (random per host, distinct across restarts);
 - semantic generation (workspace change counter);
 - event stream identity + cursor.
@@ -110,12 +116,13 @@ sockets, leases, checkpoints, streams, and generations
 Two consumers of one identical workspace generation share one
 resident service safely through independent cursors.
 
-A restart under the same toolchain restores stream continuity from
-the durable checkpoint and publishes `reconciled` events for offline
-changes. A restart under a different toolchain keeps generation
-continuity but starts a fresh stream epoch: saved cursors refuse
-instead of resuming silently. Equivalence is never inferred from
-paths or bytes alone.
+A restart with the same service executable, toolchain, and roots restores
+the bounded durable event ring and stream continuity, so acknowledged
+cursors do not replay while unacknowledged retained events remain
+available. A service executable, toolchain, or root identity change starts
+a fresh stream epoch; saved cursors refuse instead of resuming silently.
+The service build identity is the executable content SHA-256, cached for
+the life of the process. Equivalence is never inferred from path or mtime.
 
 ## Events and cursors
 
@@ -124,8 +131,8 @@ A nonzero cursor without its stream identity is refused; aged-out
 history answers `reset_required` with no events. Consumers resume
 with `(stream_identity, after_cursor)` and reconcile through the
 capsule on reset. Restart-safe behavior is covered by
-`ambient_coherence.rs` (resume, refusal, foreign-stream refusal,
-toolchain-change epoch).
+`ambient_coherence.rs` (resume after acknowledgement, retained-event
+replay, refusal, foreign-stream refusal, and toolchain/build-change epoch).
 
 ## Semantic capsule
 

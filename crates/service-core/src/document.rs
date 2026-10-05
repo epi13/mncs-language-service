@@ -526,6 +526,23 @@ impl DocumentStore {
     /// returned `(uri, generation)` pairs are consumed by the resident
     /// service so filesystem edits and LSP edits enter one event stream.
     pub fn refresh_disk(&self) -> Result<Vec<(String, u64)>, ServiceError> {
+        Ok(self
+            .refresh_disk_with(|_| true)?
+            .into_iter()
+            .filter_map(|(uri, generation, removed)| (!removed).then_some((uri, generation)))
+            .collect())
+    }
+
+    /// Reconcile disk changes while allowing the owner to capture the
+    /// previous semantic snapshot immediately before each changed document
+    /// is committed. The callback runs only for a real update or removal.
+    pub fn refresh_disk_with<F>(
+        &self,
+        mut before_change: F,
+    ) -> Result<Vec<(String, u64, bool)>, ServiceError>
+    where
+        F: FnMut(&str) -> bool,
+    {
         let _guard = self
             .discovery_lock
             .lock()
@@ -545,8 +562,32 @@ impl DocumentStore {
             if open {
                 continue;
             }
-            let Ok(text) = fs::read_to_string(&path) else {
-                continue;
+            let text = match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if previous.is_none() {
+                        continue;
+                    }
+                    if !before_change(&uri) {
+                        continue;
+                    }
+                    let mut documents = self.write_documents()?;
+                    let Some(document) = documents.get(&uri) else {
+                        continue;
+                    };
+                    if document.open() || document.disk.is_none() {
+                        continue;
+                    }
+                    let old_module = document.effective_module().map(str::to_owned);
+                    documents.remove(&uri);
+                    self.bump_content_version();
+                    self.note_module_change(&uri, old_module.as_deref(), None);
+                    drop(documents);
+                    self.notify_content_changed(&uri);
+                    changed.push((uri, self.generations.next(), true));
+                    continue;
+                }
+                Err(_) => continue,
             };
             if text.len() > MAX_DOCUMENT_BYTES {
                 continue;
@@ -571,6 +612,7 @@ impl DocumentStore {
             if same {
                 continue;
             }
+            let _ = before_change(&uri);
             let sealed = Self::seal_content(&uri, text);
             let mut documents = self.write_documents()?;
             let Some(document) = documents.get_mut(&uri) else {
@@ -588,7 +630,7 @@ impl DocumentStore {
             // The caller verified the bytes differ, so this is a real change.
             self.notify_content_changed(&uri);
             let generation = self.generations.next();
-            changed.push((uri, generation));
+            changed.push((uri, generation, false));
         }
         Ok(changed)
     }
@@ -691,29 +733,33 @@ impl DocumentStore {
     /// subsequent close/reopen cycles see consistent state.
     pub fn did_save(&self, uri: &str, text: Option<String>) -> Result<u64, ServiceError> {
         let mut documents = self.write_documents()?;
-        let _generation = self.generations.next();
         let document = documents
             .get_mut(uri)
             .ok_or_else(|| ServiceError::DocumentNotFound {
                 uri: uri.to_owned(),
             })?;
+        let old_identity = document.stored().map(|stored| stored.identity.clone());
+        let old_module = document.effective_module().map(str::to_owned);
         let saved = text.or_else(|| {
             document
                 .buffer
                 .as_ref()
                 .map(|buffer| (*buffer.content.text).clone())
         });
-        let old_module = document.effective_module().map(str::to_owned);
-        let old_identity = document.stored().map(|stored| stored.identity.clone());
         if let Some(saved) = saved {
-            document.disk = Some(Self::seal_content(uri, saved));
-            self.bump_content_version();
+            let sealed = Self::seal_content(uri, saved);
+            if document.disk.as_ref().map(|stored| &stored.identity) != Some(&sealed.identity) {
+                document.disk = Some(sealed);
+                self.bump_content_version();
+            }
         }
         let new_module = document.effective_module().map(str::to_owned);
         let new_identity = document.stored().map(|stored| stored.identity.clone());
+        let semantic_changed = old_identity != new_identity;
         self.note_module_change(uri, old_module.as_deref(), new_module.as_deref());
         drop(documents);
-        if old_identity != new_identity {
+        if semantic_changed {
+            self.generations.next();
             self.notify_content_changed(uri);
         }
         Ok(self.generations.current())
@@ -1005,7 +1051,11 @@ mod tests {
             .expect("change");
         assert_eq!((*store.content(&uri).expect("content")).clone(), "edited\n");
 
-        store.did_save(&uri, None).expect("save");
+        let changed_generation = store.generation();
+        assert_eq!(
+            store.did_save(&uri, None).expect("save"),
+            changed_generation
+        );
         assert_eq!(
             (*store.content(&uri).expect("content")).clone(),
             "edited\n",

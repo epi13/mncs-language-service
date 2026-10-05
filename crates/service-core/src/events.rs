@@ -87,12 +87,24 @@ pub struct WorkspaceChangeEvent {
     /// False means the compiler could not establish a complete semantic
     /// envelope; consumers must preserve UNKNOWN rather than widening scope.
     pub impact_complete: bool,
-    /// True when the change was reconstructed by comparing the durable
-    /// checkpoint with the workspace after the service was offline.
+    /// True when this event describes the exact current state reconstructed
+    /// from the durable checkpoint or an authoritative disk refresh.
     #[serde(default)]
     pub reconciled: bool,
+    /// Greatest earlier cursor explicitly superseded by this same-document
+    /// reconciliation. Zero means no prior event is covered.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub supersedes_through_cursor: u64,
+    /// The `current` identity is the last resident source identity when the
+    /// document was removed from disk.
+    #[serde(default)]
+    pub removed: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limitations: Vec<String>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +175,46 @@ impl EventHub {
         }
     }
 
+    /// Restore a durable event window only when it is internally consistent.
+    /// Legacy checkpoints may have a stream high-water without retained
+    /// events; those still resume at the exact high-water and explicitly
+    /// require reconciliation for any older cursor.
+    pub fn restore_checkpoint(
+        &self,
+        stream_identity: String,
+        next_cursor: u64,
+        events: Vec<WorkspaceChangeEvent>,
+    ) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if !state.events.is_empty() {
+            return false;
+        }
+        let valid = events.len() <= self.capacity
+            && events
+                .iter()
+                .all(|event| event.stream_identity == stream_identity)
+            && events
+                .windows(2)
+                .all(|pair| pair[1].cursor == pair[0].cursor + 1)
+            && events.iter().all(|event| event.cursor <= next_cursor)
+            && events
+                .last()
+                .map(|event| event.cursor)
+                .unwrap_or(next_cursor)
+                == next_cursor;
+        state.stream_identity = stream_identity;
+        state.next_cursor = next_cursor;
+        if valid {
+            state.events = events.into_iter().collect();
+            true
+        } else {
+            state.events.clear();
+            false
+        }
+    }
+
     pub fn stream_identity(&self) -> String {
         self.state
             .lock()
@@ -189,6 +241,45 @@ impl EventHub {
         self.state
             .lock()
             .map(|state| state.next_cursor)
+            .unwrap_or(0)
+    }
+
+    /// Snapshot stream identity, high-water, and retained events atomically
+    /// for the owning provider checkpoint.
+    pub fn checkpoint_snapshot(&self) -> (String, u64, Vec<WorkspaceChangeEvent>) {
+        self.state
+            .lock()
+            .map(|state| {
+                (
+                    state.stream_identity.clone(),
+                    state.next_cursor,
+                    state.events.iter().cloned().collect(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    /// Latest retained cursor that refers to this document. Consumers may
+    /// discard earlier same-document deltas only when a later event carries
+    /// this exact supersession bound and a complete current-state projection.
+    pub fn latest_cursor_for_uri(&self, uri: &str) -> u64 {
+        self.state
+            .lock()
+            .map(|state| {
+                state
+                    .events
+                    .iter()
+                    .filter(|event| {
+                        event.current.uri == uri
+                            || event
+                                .affected_documents
+                                .iter()
+                                .any(|document| document.uri == uri)
+                    })
+                    .map(|event| event.cursor)
+                    .max()
+                    .unwrap_or(0)
+            })
             .unwrap_or(0)
     }
 
@@ -308,6 +399,8 @@ mod cursor_tests {
             impact: None,
             impact_complete: false,
             reconciled: false,
+            supersedes_through_cursor: 0,
+            removed: false,
             limitations: Vec::new(),
         }
     }
@@ -350,6 +443,24 @@ mod cursor_tests {
         let at_tip = hub.poll_for(Some("stream-restored"), 10, 8);
         assert!(!at_tip.reset_required);
         assert!(at_tip.events.is_empty());
+    }
+
+    #[test]
+    fn persisted_window_replays_unacknowledged_events_after_restart() {
+        let first = EventHub::new_with_stream(8, "stream-one".to_owned());
+        first.push(event());
+        let (stream, cursor, events) = first.checkpoint_snapshot();
+        let resumed = EventHub::new_with_stream(8, "temporary".to_owned());
+        assert!(resumed.restore_checkpoint(stream.clone(), cursor, events));
+
+        let unacknowledged = resumed.poll_for(Some(&stream), 0, 8);
+        assert!(!unacknowledged.reset_required);
+        assert_eq!(unacknowledged.events.len(), 1);
+        assert_eq!(unacknowledged.events[0].cursor, 1);
+
+        let acknowledged = resumed.poll_for(Some(&stream), 1, 8);
+        assert!(!acknowledged.reset_required);
+        assert!(acknowledged.events.is_empty());
     }
 
     #[test]
@@ -427,6 +538,7 @@ pub fn project_change(
     current_generation: u64,
     before: Option<&DocumentAnalysis>,
     after: &DocumentAnalysis,
+    reconciled: bool,
 ) -> WorkspaceChangeEvent {
     let mut limitations = Vec::new();
     let mut semantic_subjects = Vec::new();
@@ -434,7 +546,36 @@ pub fn project_change(
     let mut impact_identity = None;
     let mut impact_complete = false;
 
-    if let (Some(before_program), Some(after_program)) = (
+    if before.is_none() && !reconciled {
+        if let Some(after_program) = after.front_end.program.as_ref() {
+            let identities = after_program.semantic_identities();
+            let roots: Vec<_> = identities
+                .objects
+                .iter()
+                .map(|record| record.identity.clone())
+                .collect();
+            semantic_subjects.extend(identities.objects.into_iter().map(|record| {
+                SemanticSubjectChange {
+                    identity: record.identity.0,
+                    change: "added".to_owned(),
+                    before_fingerprint: None,
+                    after_fingerprint: Some(record.fingerprint),
+                }
+            }));
+            if let Ok(graph) = after_program.semantic_graph() {
+                let projected = graph.impact_neighborhood(&roots, 2, 512);
+                impact_complete = projected.complete;
+                impact_identity = Some(projected.graph_identity.clone());
+                impact = Some(projected);
+            } else {
+                limitations
+                    .push("the current program could not produce a semantic graph".to_owned());
+            }
+        } else {
+            limitations
+                .push("new document did not elaborate into a valid semantic program".to_owned());
+        }
+    } else if let (Some(before_program), Some(after_program)) = (
         before.and_then(|analysis| analysis.front_end.program.as_ref()),
         after.front_end.program.as_ref(),
     ) {
@@ -504,7 +645,12 @@ pub fn project_change(
     let before_obligations = obligation_statuses(before);
     let after_obligations = obligation_statuses(Some(after));
     let mut obligations = WorkspaceObligationDelta::default();
-    if let (Some(before_obligations), Some(after_obligations)) =
+    if before.is_none() && !reconciled {
+        if let Some(after_obligations) = after_obligations.as_ref() {
+            obligations.complete = true;
+            obligations.added = after_obligations.keys().cloned().collect();
+        }
+    } else if let (Some(before_obligations), Some(after_obligations)) =
         (before_obligations.as_ref(), after_obligations.as_ref())
     {
         obligations.complete = true;
@@ -557,7 +703,93 @@ pub fn project_change(
         impact_identity,
         impact,
         impact_complete,
-        reconciled: false,
+        reconciled,
+        supersedes_through_cursor: 0,
+        removed: false,
+        limitations,
+    }
+}
+
+/// Project the exact removal of a previously analyzed disk document. The
+/// current identity names the last source state that was resident before the
+/// deletion; `removed` distinguishes that witness from live source content.
+pub fn project_removal(
+    uri: &str,
+    replaced_generation: u64,
+    current_generation: u64,
+    before: &DocumentAnalysis,
+    supersedes_through_cursor: u64,
+) -> WorkspaceChangeEvent {
+    let mut limitations = Vec::new();
+    let mut semantic_subjects = Vec::new();
+    let mut impact = None;
+    let mut impact_identity = None;
+    let mut impact_complete = false;
+    if let Some(program) = before.front_end.program.as_ref() {
+        let identities = program.semantic_identities();
+        let roots: Vec<_> = identities
+            .objects
+            .iter()
+            .map(|record| record.identity.clone())
+            .collect();
+        semantic_subjects.extend(identities.objects.into_iter().map(|record| {
+            SemanticSubjectChange {
+                identity: record.identity.0,
+                change: "removed".to_owned(),
+                before_fingerprint: Some(record.fingerprint),
+                after_fingerprint: None,
+            }
+        }));
+        if let Ok(graph) = program.semantic_graph() {
+            let projected = graph.impact_neighborhood(&roots, 2, 512);
+            impact_complete = projected.complete;
+            impact_identity = Some(projected.graph_identity.clone());
+            impact = Some(projected);
+        } else {
+            limitations
+                .push("the last resident program could not produce a semantic graph".to_owned());
+        }
+    } else {
+        limitations.push("the removed document had no valid resident semantic program".to_owned());
+    }
+    let obligations = match obligation_statuses(Some(before)) {
+        Some(obligations) => WorkspaceObligationDelta {
+            resolved: obligations.keys().cloned().collect(),
+            complete: true,
+            ..WorkspaceObligationDelta::default()
+        },
+        None => {
+            limitations.push(
+                "obligation removal is incomplete because the old program is unavailable"
+                    .to_owned(),
+            );
+            WorkspaceObligationDelta::default()
+        }
+    };
+    let current = SourceIdentity {
+        uri: uri.to_owned(),
+        identity: before.source_identity.clone(),
+    };
+    WorkspaceChangeEvent {
+        schema_version: WORKSPACE_CHANGE_SCHEMA_VERSION.to_owned(),
+        stream_identity: String::new(),
+        cursor: 0,
+        replaced_generation,
+        current_generation,
+        current: current.clone(),
+        affected_documents: vec![current],
+        semantic_subjects,
+        diagnostics: DiagnosticDelta {
+            resolved: diagnostic_codes(Some(before)).into_iter().collect(),
+            ..DiagnosticDelta::default()
+        },
+        obligations,
+        impact_identity,
+        impact,
+        impact_complete,
+        reconciled: true,
+        supersedes_through_cursor,
+        removed: true,
         limitations,
     }
 }

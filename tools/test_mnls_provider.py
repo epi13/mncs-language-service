@@ -209,6 +209,37 @@ class ProviderLifecycleTests(unittest.TestCase):
         finally:
             run_provider("stop", "--workspace", str(workspace), env=second_env)
 
+    def test_stale_build_reconciles_an_owned_lease_by_executable_bytes(self) -> None:
+        workspace = self.make_workspace("records.mncs")
+        alternate = workspace / "mnls-language-service-host"
+        shutil.copy2(self.host, alternate)
+        with alternate.open("ab") as executable:
+            executable.write(b"selected-build-change")
+        os.chmod(alternate, 0o755)
+        original = dict(self.env)
+        selected = dict(self.env)
+        selected["MNLS_LANGUAGE_SERVICE_HOST"] = str(alternate)
+
+        started = run_provider("ensure", "--workspace", str(workspace), env=original)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        try:
+            status = run_provider("status", "--workspace", str(workspace), env=selected)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertEqual(stdout_json(status)["state"], "stale-build")
+
+            reconciled = run_provider("ensure", "--workspace", str(workspace), env=selected)
+            self.assertEqual(reconciled.returncode, 0, reconciled.stdout + reconciled.stderr)
+            self.assertEqual(stdout_json(reconciled)["state"], "started")
+
+            ready = run_provider("status", "--workspace", str(workspace), env=selected)
+            self.assertTrue(stdout_json(ready)["ready"], ready.stdout)
+            self.assertEqual(
+                stdout_json(ready)["service"]["build_fingerprint"],
+                stdout_json(ready)["selected"]["host"]["build_fingerprint"],
+            )
+        finally:
+            run_provider("stop", "--workspace", str(workspace), env=selected)
+
     def test_poll_capsule_and_query_serve_bounded_reads(self) -> None:
         workspace = self.make_workspace("records.mncs", "syntax-error.mncs")
         ensured = run_provider("ensure", "--workspace", str(workspace), env=self.env)

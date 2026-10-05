@@ -25,7 +25,6 @@ import hashlib
 import json
 import os
 import shlex
-import shutil
 import signal
 import socket
 import subprocess
@@ -182,7 +181,7 @@ def pid_alive(pid: int) -> bool:
 
 
 def host_command() -> list[str]:
-    """Provider-owned host discovery: explicit env, own build tree, PATH."""
+    """Resolve only the selected host or this provider checkout's build."""
     override = os.environ.get("MNLS_LANGUAGE_SERVICE_HOST")
     if override:
         return shlex.split(override)
@@ -191,10 +190,32 @@ def host_command() -> list[str]:
         candidate = repo / "target" / profile / HOST_BINARY
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return [str(candidate)]
-    found = shutil.which(HOST_BINARY)
-    if found:
-        return [found]
     return []
+
+
+def selected_host_identity() -> dict:
+    """Return exact selected executable bytes; never infer identity from path."""
+    command = host_command()
+    if not command:
+        return {"command": [], "executable": None, "build_fingerprint": "unknown"}
+    raw = command[0]
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute() and os.sep not in raw:
+        # A bare executable is accepted only when explicitly selected; resolve
+        # it against PATH here so its bytes, rather than its name, are bound.
+        resolved = next((Path(directory) / raw for directory in os.environ.get("PATH", "").split(os.pathsep)
+                         if (Path(directory) / raw).is_file()), None)
+        candidate = resolved if resolved is not None else candidate
+    try:
+        executable = candidate.resolve(strict=True)
+        digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+    except OSError:
+        return {"command": command, "executable": None, "build_fingerprint": "unknown"}
+    return {
+        "command": command,
+        "executable": str(executable),
+        "build_fingerprint": f"sha256:{digest}",
+    }
 
 
 def language_toolchain() -> dict:
@@ -347,6 +368,15 @@ def probe(workspace: Path, timeout: float, repository_roots: list[Path] | None =
     if (isinstance(reported_digest, str) and reported_digest != measured["digest"]):
         return ("stale-toolchain", observed,
                 "resident toolchain binding differs from the measured toolchain")
+    selected_build = selected_host_identity()["build_fingerprint"]
+    service = observed.get("service", {})
+    resident_build = service.get("build_fingerprint") if isinstance(service, dict) else None
+    if selected_build == "unknown" or not isinstance(resident_build, str) or resident_build == "unknown":
+        return ("build-unverified", observed,
+                "selected or resident executable bytes could not be verified")
+    if selected_build != resident_build:
+        return ("stale-build", observed,
+                "resident executable bytes differ from the selected provider build")
     return ("ready", observed, "provider readiness contract satisfied")
 
 
@@ -354,6 +384,7 @@ def status_document(workspace: Path, timeout: float, repository_roots: list[Path
     selected_roots = repository_roots or [workspace]
     state, observed, detail = probe(workspace, timeout, selected_roots)
     measured = language_toolchain()
+    selected_host = selected_host_identity()
     lease = read_lease(workspace)
     document: dict = {
         "schema_version": STATUS_SCHEMA,
@@ -365,6 +396,7 @@ def status_document(workspace: Path, timeout: float, repository_roots: list[Path
             "workspace_root": str(workspace),
             "repository_roots": [str(path) for path in selected_roots],
             "toolchain": measured,
+            "host": selected_host,
         },
         "socket": str(socket_path(workspace)),
         "lease": {
@@ -383,6 +415,7 @@ def status_document(workspace: Path, timeout: float, repository_roots: list[Path
             "instance_id": service.get("instance_id"),
             "pid": service.get("pid"),
             "version": service.get("version"),
+            "executable": service.get("executable"),
             "build_fingerprint": service.get("build_fingerprint"),
         }
         # Doctor persists `observed`/`selected` into service observations,
@@ -493,6 +526,12 @@ def cmd_ensure(args: argparse.Namespace) -> int:
         print(json.dumps({"state": "refused", "detail": detail},
                          indent=2, sort_keys=True))
         return 3
+    if state == "build-unverified":
+        print(json.dumps({
+            "state": "refused",
+            "detail": detail + "; rebuild evidence is required before restart",
+        }, indent=2, sort_keys=True))
+        return 3
     command = host_command()
     if not command:
         print(json.dumps({
@@ -509,11 +548,11 @@ def cmd_ensure(args: argparse.Namespace) -> int:
     # A live socket without an owned lease is never killed: it belongs to
     # another supervisor (or an operator) and must be stopped explicitly.
     lease = read_lease(workspace)
-    if state in ("stale-toolchain", "stale-roots"):
+    if state in ("stale-toolchain", "stale-roots", "stale-build"):
         if not (isinstance(lease, dict) and lease.get("owned_by_provider")):
             print(json.dumps({
                 "state": "refused",
-                "detail": ("resident toolchain is stale but the live host is not "
+                "detail": ("resident state is stale but the live host is not "
                            "provider-owned; stop it explicitly"),
             }, indent=2, sort_keys=True))
             return 3

@@ -15,7 +15,7 @@
 //! tests against the real kernel, not by a duplicated decision procedure.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use mncs_codegen::{execute_backend, RESEARCH_BYTECODE_BACKEND_NAME};
 use mncs_compiler::{ReferenceCompiler, SourceFrontEndResult};
@@ -70,8 +70,8 @@ pub struct ServiceIdentity {
     pub instance_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub executable: Option<String>,
-    /// Content fingerprint of the running build (version + executable path +
-    /// modification time). Rebuilding the host changes this value.
+    /// SHA-256 identity of the executable bytes loaded by this process.
+    /// The path is reported separately and is never part of build identity.
     pub build_fingerprint: String,
 }
 
@@ -127,21 +127,21 @@ pub(crate) fn build_fingerprint() -> (Option<String>, String) {
     let executable = std::env::current_exe()
         .ok()
         .map(|path| path.display().to_string());
-    let mtime = std::env::current_exe()
-        .ok()
-        .and_then(|path| std::fs::metadata(path).ok())
-        .and_then(|metadata| metadata.modified().ok())
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos().to_string())
-        .unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(b"mnls-build/1\n");
-    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
-    hasher.update([0]);
-    hasher.update(executable.as_deref().unwrap_or("").as_bytes());
-    hasher.update([0]);
-    hasher.update(mtime.as_bytes());
-    (executable, format!("sha256:{:x}", hasher.finalize()))
+    static FINGERPRINT: OnceLock<String> = OnceLock::new();
+    let fingerprint = FINGERPRINT.get_or_init(|| {
+        // On Linux this names the image actually loaded by this process,
+        // including when the path was replaced after startup. Other targets
+        // fall back to current_exe. Failure remains explicitly unknown.
+        let image = std::fs::read("/proc/self/exe").ok().or_else(|| {
+            executable
+                .as_deref()
+                .and_then(|path| std::fs::read(path).ok())
+        });
+        image
+            .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))
+            .unwrap_or_else(|| "unknown".to_owned())
+    });
+    (executable, fingerprint.clone())
 }
 
 // ---------------------------------------------------------------------------

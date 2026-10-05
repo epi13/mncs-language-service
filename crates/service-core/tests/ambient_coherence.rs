@@ -126,7 +126,15 @@ fn separate_workspaces_never_share_semantic_state() {
     // An edit in one workspace advances only its own generation.
     let uri = workspace_uri(&first_root, "valid-contracts.mncs");
     let before = first_status.generation;
-    first.did_save(&uri, None).expect("save");
+    let original = fs::read_to_string(first_root.join("valid-contracts.mncs"))
+        .expect("read first workspace source");
+    first
+        .did_change(
+            &uri,
+            1,
+            original.replace("return next;", "return next + 1;"),
+        )
+        .expect("change first workspace source");
     let after = first.service_status().expect("first status again");
     assert!(after.generation > before);
     let second_again = second.service_status().expect("second status again");
@@ -291,6 +299,85 @@ fn capsule_window_resumes_or_reconciles_explicitly() {
 }
 
 #[test]
+fn disk_edit_then_removal_emits_complete_superseding_semantic_state() {
+    let root = temp_workspace("disk-removal");
+    seed_workspace(&root, &["valid-contracts.mncs"]);
+    let service = LanguageService::new(None);
+    service
+        .configure_root(Some(root.clone()))
+        .expect("configure root");
+    let uri = workspace_uri(&root, "valid-contracts.mncs");
+    service.snapshot(&uri).expect("baseline analysis");
+    let baseline = service.service_status().expect("baseline status");
+
+    let path = root.join("valid-contracts.mncs");
+    let original = fs::read_to_string(&path).expect("read source");
+    fs::write(&path, original.replace("return next;", "return next + 1;"))
+        .expect("write source edit");
+    assert_eq!(
+        service
+            .refresh_workspace()
+            .expect("publish disk edit")
+            .len(),
+        1
+    );
+
+    fs::remove_file(&path).expect("remove source");
+    assert_eq!(
+        service
+            .refresh_workspace()
+            .expect("publish disk removal")
+            .len(),
+        1
+    );
+    let status = service.service_status().expect("post-removal status");
+    assert_eq!(status.documents, 0);
+    let window = service.poll_events_for(Some(&baseline.stream_identity), 0, 8);
+    assert!(!window.reset_required, "both changes remain replayable");
+    assert_eq!(window.events.len(), 2);
+    assert!(!window.events[0].removed);
+    let removal = &window.events[1];
+    assert!(removal.removed);
+    assert!(removal.reconciled);
+    assert_eq!(removal.supersedes_through_cursor, window.events[0].cursor);
+    assert!(removal.impact_complete, "removal covers its resident graph");
+    assert!(removal.obligations.complete);
+    assert!(removal
+        .semantic_subjects
+        .iter()
+        .all(|subject| subject.change == "removed"));
+}
+
+#[test]
+fn first_editor_change_analyzes_the_existing_disk_side_before_mutation() {
+    let root = temp_workspace("first-editor-change");
+    seed_workspace(&root, &["valid-contracts.mncs"]);
+    let service = LanguageService::new(None);
+    service
+        .configure_root(Some(root.clone()))
+        .expect("configure root");
+    let uri = workspace_uri(&root, "valid-contracts.mncs");
+    let original = fs::read_to_string(root.join("valid-contracts.mncs")).expect("read source");
+    let before = service.service_status().expect("baseline status");
+
+    service
+        .did_change(
+            &uri,
+            1,
+            original.replace("return next;", "return next + 1;"),
+        )
+        .expect("first editor change");
+    let window = service.poll_events_for(Some(&before.stream_identity), before.event_cursor, 8);
+    assert!(!window.reset_required);
+    assert_eq!(window.events.len(), 1);
+    assert!(
+        window.events[0].impact_complete,
+        "both semantic sides are known"
+    );
+    assert!(window.events[0].obligations.complete);
+}
+
+#[test]
 fn restart_restores_stream_but_toolchain_change_forces_a_new_epoch() {
     let root = temp_workspace("restart");
     seed_workspace(&root, &["valid-contracts.mncs"]);
@@ -298,9 +385,13 @@ fn restart_restores_stream_but_toolchain_change_forces_a_new_epoch() {
     first
         .configure_root(Some(root.clone()))
         .expect("first root");
-    let uri = workspace_uri(&root, "valid-contracts.mncs");
-    first.did_save(&uri, None).expect("first edit");
+    let path = root.join("valid-contracts.mncs");
+    let original = fs::read_to_string(&path).expect("read source");
+    fs::write(&path, original.replace("return next;", "return next + 1;"))
+        .expect("write source edit");
+    assert_eq!(first.refresh_workspace().expect("publish edit").len(), 1);
     let before = first.service_status().expect("before status");
+    assert_eq!(before.event_cursor, 1);
 
     // Same toolchain restart: stream continuity is restored from the
     // durable checkpoint.
@@ -326,10 +417,36 @@ fn restart_restores_stream_but_toolchain_change_forces_a_new_epoch() {
         let behind =
             second.poll_events_for(Some(&before.stream_identity), before.event_cursor - 1, 8);
         assert!(
-            behind.reset_required,
-            "lost in-memory history requires explicit reconciliation"
+            !behind.reset_required,
+            "the durable event window resumes exactly across a service restart"
         );
+        assert_eq!(behind.events.len(), 1);
+        assert_eq!(behind.events[0].cursor, before.event_cursor);
     }
+
+    // A different Language Service executable starts a new semantic epoch;
+    // stale event cursors are never rebound to changed provider semantics.
+    let checkpoint_path = root
+        .join(".mncs")
+        .join("mnls-language-service.checkpoint.json");
+    let mut checkpoint: serde_json::Value =
+        serde_json::from_slice(&fs::read(&checkpoint_path).expect("read checkpoint"))
+            .expect("decode checkpoint");
+    checkpoint["service_build_fingerprint"] =
+        serde_json::Value::String("sha256:stale-service-build".to_owned());
+    fs::write(
+        &checkpoint_path,
+        serde_json::to_vec_pretty(&checkpoint).expect("encode checkpoint"),
+    )
+    .expect("write stale build identity");
+    let rebuilt = LanguageService::new(None);
+    rebuilt
+        .configure_root(Some(root.clone()))
+        .expect("new service build root");
+    let rebuilt_status = rebuilt.service_status().expect("new service status");
+    assert_ne!(rebuilt_status.stream_identity, before.stream_identity);
+    assert_eq!(rebuilt_status.event_cursor, 0);
+
     assert!(
         after
             .checkpoint

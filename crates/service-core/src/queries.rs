@@ -542,6 +542,11 @@ struct WorkspaceCheckpoint {
     stream_identity: String,
     last_generation: u64,
     last_cursor: u64,
+    /// Bounded same-stream replay window. Older checkpoints omit it and
+    /// therefore retain high-water identity while requiring explicit
+    /// reconciliation for cursors behind that high-water.
+    #[serde(default)]
+    event_history: Vec<crate::events::WorkspaceChangeEvent>,
     documents: BTreeMap<String, String>,
     /// Exact source roots selected inside the workspace. Empty in legacy
     /// checkpoints; those inherit the former whole-root behavior.
@@ -552,6 +557,10 @@ struct WorkspaceCheckpoint {
     /// that no longer matches forces a fresh event stream.
     #[serde(default)]
     toolchain_identity: Option<crate::ambient::ToolchainIdentity>,
+    /// Executable identity for the Language Service runtime itself. A build
+    /// change starts a new semantic epoch even when compiler inputs match.
+    #[serde(default)]
+    service_build_fingerprint: Option<String>,
 }
 
 fn workspace_checkpoint_path(root: &Path) -> PathBuf {
@@ -729,25 +738,40 @@ impl LanguageService {
                 }
             }
         }
-        let before_by_uri: BTreeMap<String, Arc<DocumentAnalysis>> = self
-            .store
-            .document_uris()
-            .into_iter()
-            .filter_map(|uri| {
-                let snapshot = self.cached_any_snapshot(&uri)?;
-                let current = self.content_fingerprint(&uri).ok()?;
-                (current == snapshot.source_identity).then_some((uri, snapshot))
-            })
-            .collect();
-        let changed = self.store.refresh_disk()?;
-        for (uri, generation) in changed {
-            if let Some(cursor) = self.observe_change(
-                &uri,
-                generation.saturating_sub(1),
-                generation,
-                before_by_uri.get(&uri).cloned(),
-                false,
-            )? {
+        let mut before_by_uri = BTreeMap::<String, Arc<DocumentAnalysis>>::new();
+        let changed = self.store.refresh_disk_with(|uri| {
+            let snapshot = self
+                .cached_snapshot_if_current(uri)
+                .or_else(|| self.snapshot(uri).ok());
+            if let Some(snapshot) = snapshot {
+                before_by_uri.insert(uri.to_owned(), snapshot);
+                true
+            } else {
+                false
+            }
+        })?;
+        for (uri, generation, removed) in changed {
+            let before = before_by_uri.get(&uri).cloned();
+            let cursor = if removed {
+                match before.as_deref() {
+                    Some(snapshot) => self.observe_removal(
+                        &uri,
+                        generation.saturating_sub(1),
+                        generation,
+                        snapshot,
+                    )?,
+                    None => None,
+                }
+            } else {
+                self.observe_change(
+                    &uri,
+                    generation.saturating_sub(1),
+                    generation,
+                    before,
+                    false,
+                )?
+            };
+            if let Some(cursor) = cursor {
                 published.push(cursor);
             }
         }
@@ -771,14 +795,38 @@ impl LanguageService {
         {
             return Ok(None);
         }
-        let mut event = crate::events::project_change(
+        let event = crate::events::project_change(
             uri,
             replaced_generation,
             expected_generation,
             before.as_deref(),
             &after,
+            reconciled,
         );
-        event.reconciled = reconciled;
+        let cursor = self.events.push(event);
+        self.evict_stale_analyses();
+        self.persist_checkpoint()?;
+        Ok(Some(cursor))
+    }
+
+    fn observe_removal(
+        &self,
+        uri: &str,
+        replaced_generation: u64,
+        expected_generation: u64,
+        before: &DocumentAnalysis,
+    ) -> Result<Option<u64>, ServiceError> {
+        if self.store.generation() != expected_generation {
+            return Ok(None);
+        }
+        let supersedes_through_cursor = self.events.latest_cursor_for_uri(uri);
+        let event = crate::events::project_removal(
+            uri,
+            replaced_generation,
+            expected_generation,
+            before,
+            supersedes_through_cursor,
+        );
         let cursor = self.events.push(event);
         self.evict_stale_analyses();
         self.persist_checkpoint()?;
@@ -787,8 +835,11 @@ impl LanguageService {
 
     fn begin_change(&self, uri: &str) -> (u64, Option<Arc<DocumentAnalysis>>) {
         let replaced_generation = self.store.generation();
-        let before = self.cached_any_snapshot(uri).filter(|snapshot| {
-            self.content_fingerprint(uri).ok().as_deref() == Some(snapshot.source_identity.as_str())
+        let before = self.cached_snapshot_if_current(uri).or_else(|| {
+            self.snapshot(uri).ok().filter(|snapshot| {
+                self.content_fingerprint(uri).ok().as_deref()
+                    == Some(snapshot.source_identity.as_str())
+            })
         });
         (replaced_generation, before)
     }
@@ -820,6 +871,9 @@ impl LanguageService {
     pub fn did_save(&self, uri: &str, text: Option<String>) -> Result<u64, ServiceError> {
         let (replaced_generation, before) = self.begin_change(uri);
         let generation = self.store.did_save(uri, text)?;
+        if generation == replaced_generation {
+            return Ok(generation);
+        }
         let _ = self.observe_change(uri, replaced_generation, generation, before, false)?;
         Ok(generation)
     }
@@ -923,6 +977,7 @@ impl LanguageService {
         let checkpoint_path = workspace_checkpoint_path(&root);
         let checkpoint = load_workspace_checkpoint(&checkpoint_path, &root)?;
         let current_toolchain = crate::ambient::ToolchainIdentity::current();
+        let (_, current_service_build) = crate::ambient::build_fingerprint();
         let normalized_root_ids: Vec<String> = normalized_roots
             .iter()
             .map(|path| path.display().to_string())
@@ -947,13 +1002,19 @@ impl LanguageService {
         let roots_changed = prior_roots
             .as_ref()
             .is_some_and(|previous| previous != &normalized_root_ids);
-        let continuity_changed = toolchain_changed || roots_changed;
+        let service_build_changed = checkpoint.as_ref().is_some_and(|checkpoint| {
+            checkpoint.service_build_fingerprint.as_deref() != Some(current_service_build.as_str())
+        });
+        let continuity_changed = toolchain_changed || roots_changed || service_build_changed;
         if let Some(checkpoint) = checkpoint.as_ref() {
             self.store
                 .restore_generation_at_least(checkpoint.last_generation);
             if !continuity_changed {
-                self.events
-                    .restore_stream(checkpoint.stream_identity.clone(), checkpoint.last_cursor);
+                self.events.restore_checkpoint(
+                    checkpoint.stream_identity.clone(),
+                    checkpoint.last_cursor,
+                    checkpoint.event_history.clone(),
+                );
             }
         }
         if let Ok(mut writable) = self.checkpoint.lock() {
@@ -963,15 +1024,19 @@ impl LanguageService {
                 stream_identity: self.events.stream_identity(),
                 last_generation: self.store.generation(),
                 last_cursor: self.events.current_cursor(),
+                event_history: Vec::new(),
                 documents: BTreeMap::new(),
                 discovery_roots: normalized_root_ids.clone(),
                 toolchain_identity: Some(current_toolchain.clone()),
+                service_build_fingerprint: Some(current_service_build.clone()),
             }));
             if continuity_changed {
                 if let Some(writable) = writable.as_mut() {
                     writable.stream_identity = self.events.stream_identity();
                     writable.last_cursor = self.events.current_cursor();
+                    writable.event_history.clear();
                     writable.toolchain_identity = Some(current_toolchain.clone());
+                    writable.service_build_fingerprint = Some(current_service_build.clone());
                 }
             }
             if let Some(writable) = writable.as_mut() {
@@ -1020,6 +1085,7 @@ impl LanguageService {
                 stream_identity: self.events.stream_identity(),
                 last_generation: 0,
                 last_cursor: 0,
+                event_history: Vec::new(),
                 documents: BTreeMap::new(),
                 discovery_roots: self
                     .store
@@ -1028,9 +1094,13 @@ impl LanguageService {
                     .map(|path| path.display().to_string())
                     .collect(),
                 toolchain_identity: Some(crate::ambient::ToolchainIdentity::current()),
+                service_build_fingerprint: Some(crate::ambient::build_fingerprint().1),
             });
         checkpoint.last_generation = self.store.generation();
-        checkpoint.last_cursor = self.events.current_cursor();
+        let (stream_identity, last_cursor, event_history) = self.events.checkpoint_snapshot();
+        checkpoint.stream_identity = stream_identity;
+        checkpoint.last_cursor = last_cursor;
+        checkpoint.event_history = event_history;
         checkpoint.documents = documents;
         checkpoint.discovery_roots = self
             .store
@@ -1039,6 +1109,7 @@ impl LanguageService {
             .map(|path| path.display().to_string())
             .collect();
         checkpoint.toolchain_identity = Some(crate::ambient::ToolchainIdentity::current());
+        checkpoint.service_build_fingerprint = Some(crate::ambient::build_fingerprint().1);
         let raw = serde_json::to_vec_pretty(&checkpoint).map_err(|error| {
             ServiceError::InvalidRequest {
                 reason: format!("could not encode workspace checkpoint: {error}"),
