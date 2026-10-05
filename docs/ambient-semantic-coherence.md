@@ -82,6 +82,11 @@ Safety rules (tested in `tools/test_mnls_provider.py`):
   restart.
 - A missing host binary reports `host-unavailable` with an exact
   build hint instead of guessing.
+- A failed host start includes a bounded host-log tail. Socket-bind
+  permission failures publish a `recovery` descriptor with
+  `disposition=operator-action-required`; Doctor must not loop or guess at
+  a broader permission change. Status carries that descriptor until a newer
+  successful listen attempt supersedes the failed one.
 - `stop` is idempotent and verifies the leased instance before
   signaling; interrupted starts are adopted only when the live
   socket reports the same workspace.

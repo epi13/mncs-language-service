@@ -193,6 +193,61 @@ def host_command() -> list[str]:
     return []
 
 
+def recent_host_log(workspace: Path, limit: int = 4096) -> str:
+    """Read a bounded tail of the provider-owned host log for failed starts."""
+    path = workspace / ".mncs" / "mnls-language-service.log"
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - limit))
+            value = stream.read(limit).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(line for line in value.splitlines() if line.strip())[-limit:]
+
+
+def startup_recovery(detail: str, socket: Path) -> dict | None:
+    """Classify host socket failures without guessing at other start errors."""
+    lines = detail.splitlines()
+    listen_indexes = [index for index, line in enumerate(lines)
+                      if "resident service listening at" in line.lower()]
+    # Only classify the tail after the most recent listen attempt. A later
+    # successful start supersedes an older failure still present in the log.
+    latest_attempt = ("\n".join(lines[listen_indexes[-1]:])
+                      if listen_indexes else detail)
+    lowered = latest_attempt.lower()
+    socket_context = ("resident service listening at" in lowered
+                      or "bind:" in lowered or str(socket).lower() in lowered)
+    if not socket_context:
+        return None
+    if "operation not permitted" in lowered:
+        code = "socket-bind-denied"
+        action = ("Run the selected Language Service host in a process context "
+                  "that permits AF_UNIX bind on the selected socket path.")
+    elif "read-only file system" in lowered:
+        code = "socket-path-read-only"
+        action = "Make the selected workspace socket directory writable to the host process."
+    elif "permission denied" in lowered:
+        code = "socket-path-permission-denied"
+        action = "Grant the selected host permission to bind its provider-owned workspace socket."
+    else:
+        return None
+    return {
+        "schema_version": "mncs.language-service.recovery/1",
+        "disposition": "operator-action-required",
+        "code": code,
+        "socket_path": str(socket),
+        "automatic_remediation": False,
+        "action": action,
+    }
+
+
+def start_failure_detail(workspace: Path, fallback: str) -> str:
+    tail = recent_host_log(workspace)
+    return f"{fallback}; host log tail: {tail}" if tail else fallback
+
+
 def selected_host_identity() -> dict:
     """Return exact selected executable bytes; never infer identity from path."""
     command = host_command()
@@ -407,6 +462,12 @@ def status_document(workspace: Path, timeout: float, repository_roots: list[Path
             "pid_alive": pid_alive(int(lease.get("pid") or 0)) if isinstance(lease, dict) else False,
         },
     }
+    if state != "ready":
+        host_log = recent_host_log(workspace)
+        recovery = startup_recovery(host_log, socket_path(workspace))
+        if recovery is not None:
+            document["detail"] = f"{detail}; last host startup: {host_log[-1000:]}"
+            document["recovery"] = recovery
     if observed is not None:
         service = observed.get("service", {}) if isinstance(observed, dict) else {}
         diagnostics = observed.get("diagnostics", {}) if isinstance(observed, dict) else {}
@@ -605,8 +666,12 @@ def cmd_ensure(args: argparse.Namespace) -> int:
                 start_new_session=True, close_fds=True,
             )
     except OSError as error:
-        print(json.dumps({"state": "start-failed", "detail": str(error)},
-                         indent=2, sort_keys=True))
+        detail = str(error)
+        result = {"state": "start-failed", "detail": detail}
+        recovery = startup_recovery(detail, socket_path(workspace))
+        if recovery is not None:
+            result["recovery"] = recovery
+        print(json.dumps(result, indent=2, sort_keys=True))
         return 4
     write_lease(workspace, {
         "schema_version": LEASE_SCHEMA,
@@ -630,8 +695,12 @@ def cmd_ensure(args: argparse.Namespace) -> int:
                 lease_path(workspace).unlink(missing_ok=True)
             except OSError:
                 pass
-            print(json.dumps({"state": "start-failed", "detail": last_detail},
-                             indent=2, sort_keys=True))
+            detail = start_failure_detail(workspace, last_detail)
+            result = {"state": "start-failed", "detail": detail}
+            recovery = startup_recovery(detail, sock)
+            if recovery is not None:
+                result["recovery"] = recovery
+            print(json.dumps(result, indent=2, sort_keys=True))
             return 4
         state, observed, detail = probe(workspace, args.timeout, roots)
         last_detail = detail
@@ -657,8 +726,12 @@ def cmd_ensure(args: argparse.Namespace) -> int:
             process.wait(timeout=2)
         except subprocess.SubprocessError:
             process.kill()
-    print(json.dumps({"state": "start-timeout", "detail": last_detail},
-                     indent=2, sort_keys=True))
+    detail = start_failure_detail(workspace, last_detail)
+    result = {"state": "start-timeout", "detail": detail}
+    recovery = startup_recovery(detail, sock)
+    if recovery is not None:
+        result["recovery"] = recovery
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 4
 
 

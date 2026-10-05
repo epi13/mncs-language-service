@@ -118,6 +118,40 @@ class ProviderLifecycleTests(unittest.TestCase):
         self.assertEqual(document["state"], "absent")
         self.assertEqual(document["selected"]["workspace_root"], str(workspace.resolve()))
 
+    def test_failed_host_startup_preserves_socket_permission_blocker(self) -> None:
+        workspace = self.make_workspace("records.mncs")
+        fake_host = workspace / "fake-language-service-host"
+        fake_host.write_text(
+            "#!/bin/sh\n"
+            "echo 'mnls-language-service-host: resident service listening at /tmp/provider-test.sock'\n"
+            "echo 'mnls-language-service-host: fatal: Operation not permitted (os error 1)'\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        fake_host.chmod(0o755)
+        env = {**self.env, "MNLS_LANGUAGE_SERVICE_HOST": str(fake_host)}
+
+        started = run_provider("ensure", "--workspace", str(workspace), env=env)
+        self.assertEqual(started.returncode, 4)
+        failure = stdout_json(started)
+        self.assertEqual(failure["state"], "start-failed")
+        self.assertIn("Operation not permitted", failure["detail"])
+        self.assertEqual(failure["recovery"]["code"], "socket-bind-denied")
+        self.assertFalse(failure["recovery"]["automatic_remediation"])
+
+        status = run_provider("status", "--workspace", str(workspace), env=env)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        observation = stdout_json(status)
+        self.assertEqual(observation["recovery"]["code"], "socket-bind-denied")
+        self.assertIn("Operation not permitted", observation["detail"])
+
+        log = workspace / ".mncs" / "mnls-language-service.log"
+        with log.open("a", encoding="utf-8") as stream:
+            stream.write("mnls-language-service-host: resident service listening at /tmp/provider-test.sock\n")
+        quiet_status = run_provider("status", "--workspace", str(workspace), env=env)
+        self.assertEqual(quiet_status.returncode, 0, quiet_status.stderr)
+        self.assertNotIn("recovery", stdout_json(quiet_status))
+
     def test_status_rejects_a_missing_workspace(self) -> None:
         missing = Path(tempfile.mkdtemp(prefix="mnls-provider-missing-")) / "nope"
         completed = run_provider("status", "--workspace", str(missing), env=self.env)
