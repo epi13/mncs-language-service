@@ -37,6 +37,14 @@ fn workspace_uri(root: &std::path::Path, name: &str) -> String {
     format!("file://{}", root.join(name).display())
 }
 
+fn analyze_seeded(service: &LanguageService, root: &std::path::Path, names: &[&str]) {
+    for name in names {
+        service
+            .snapshot(&workspace_uri(root, name))
+            .expect("analyze fixture");
+    }
+}
+
 #[test]
 fn service_status_binds_service_workspace_and_toolchain_identity() {
     let root = temp_workspace("status");
@@ -45,6 +53,12 @@ fn service_status_binds_service_workspace_and_toolchain_identity() {
     service
         .configure_root(Some(root.clone()))
         .expect("configure root");
+
+    // Status summarizes resident analysis only. Explicitly request the source
+    // whose diagnostic evidence this contract test is checking.
+    service
+        .snapshot(&workspace_uri(&root, "syntax-error.mncs"))
+        .expect("analyze syntax-error fixture");
 
     let status = service.service_status().expect("service status");
     assert_eq!(status.schema_version, SERVICE_STATUS_SCHEMA_VERSION);
@@ -95,6 +109,13 @@ fn separate_workspaces_never_share_semantic_state() {
         .configure_root(Some(second_root.clone()))
         .expect("second root");
 
+    first
+        .snapshot(&workspace_uri(&first_root, "valid-contracts.mncs"))
+        .expect("analyze first workspace");
+    second
+        .snapshot(&workspace_uri(&second_root, "syntax-error.mncs"))
+        .expect("analyze second workspace");
+
     let first_status = first.service_status().expect("first status");
     let second_status = second.service_status().expect("second status");
     assert_ne!(first_status.workspace_root, second_status.workspace_root);
@@ -122,6 +143,11 @@ fn capsule_is_bounded_admitted_by_policy_and_expandable() {
     seed_workspace(&root, &["valid-contracts.mncs", "syntax-error.mncs"]);
     let service = LanguageService::new(None);
     service.configure_root(Some(root.clone())).expect("root");
+    analyze_seeded(
+        &service,
+        &root,
+        &["valid-contracts.mncs", "syntax-error.mncs"],
+    );
 
     let capsule = service.semantic_capsule(None, 0).expect("fresh capsule");
     assert_eq!(capsule.schema_version, SEMANTIC_CAPSULE_SCHEMA_VERSION);
@@ -183,6 +209,7 @@ fn quiet_workspace_produces_an_empty_actionable_capsule() {
     seed_workspace(&root, &["records.mncs"]);
     let service = LanguageService::new(None);
     service.configure_root(Some(root.clone())).expect("root");
+    analyze_seeded(&service, &root, &["records.mncs"]);
 
     let capsule = service.semantic_capsule(None, 0).expect("quiet capsule");
     assert_eq!(capsule.status, ResponseStatus::Answered, "{capsule:#?}");
@@ -195,6 +222,22 @@ fn quiet_workspace_produces_an_empty_actionable_capsule() {
             .all(|finding| finding.relevance != "actionable"),
         "{capsule:#?}"
     );
+}
+
+#[test]
+fn incomplete_capsule_is_explicit_and_does_not_force_analysis() {
+    let root = temp_workspace("capsule-lazy");
+    seed_workspace(&root, &["valid-contracts.mncs", "syntax-error.mncs"]);
+    let service = LanguageService::new(None);
+    service.configure_root(Some(root)).expect("root");
+
+    let before = service.service_status().expect("status before capsule");
+    assert_eq!(before.analysis_pending, 2);
+    let capsule = service.semantic_capsule(None, 0).expect("partial capsule");
+    assert!(matches!(capsule.status, ResponseStatus::Unsupported { .. }));
+    assert_eq!(capsule.measured.analysis_pending_documents, 2);
+    let after = service.service_status().expect("status after capsule");
+    assert_eq!(after.analysis_pending, before.analysis_pending);
 }
 
 #[test]
@@ -269,6 +312,24 @@ fn restart_restores_stream_but_toolchain_change_forces_a_new_epoch() {
     assert_eq!(after.stream_identity, before.stream_identity);
     assert!(after.generation >= before.generation);
     assert_ne!(after.service.instance_id, before.service.instance_id);
+    let resumed = second.poll_events_for(Some(&before.stream_identity), before.event_cursor, 8);
+    assert!(
+        !resumed.reset_required,
+        "acknowledged cursor resumes in the same stream"
+    );
+    assert!(
+        resumed.events.is_empty(),
+        "acknowledged work is not replayed as new"
+    );
+    assert_eq!(resumed.current_cursor, before.event_cursor);
+    if before.event_cursor > 0 {
+        let behind =
+            second.poll_events_for(Some(&before.stream_identity), before.event_cursor - 1, 8);
+        assert!(
+            behind.reset_required,
+            "lost in-memory history requires explicit reconciliation"
+        );
+    }
     assert!(
         after
             .checkpoint
@@ -361,7 +422,14 @@ fn ambient_queries_serve_over_the_resident_socket() {
     let root = temp_workspace("socket");
     seed_workspace(&root, &["valid-contracts.mncs", "syntax-error.mncs"]);
     let service = Arc::new(LanguageService::new(None));
-    service.configure_root(Some(root)).expect("socket root");
+    service
+        .configure_root(Some(root.clone()))
+        .expect("socket root");
+    analyze_seeded(
+        &service,
+        &root,
+        &["valid-contracts.mncs", "syntax-error.mncs"],
+    );
     let socket = std::env::temp_dir().join(format!(
         "mncs-language-service-ambient-{}-{}.sock",
         std::process::id(),

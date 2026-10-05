@@ -543,6 +543,10 @@ struct WorkspaceCheckpoint {
     last_generation: u64,
     last_cursor: u64,
     documents: BTreeMap<String, String>,
+    /// Exact source roots selected inside the workspace. Empty in legacy
+    /// checkpoints; those inherit the former whole-root behavior.
+    #[serde(default)]
+    discovery_roots: Vec<String>,
     /// Toolchain binding at checkpoint time. Optional so checkpoints
     /// written before toolchain binding still load; a present binding
     /// that no longer matches forces a fresh event stream.
@@ -843,6 +847,18 @@ impl LanguageService {
         &self,
         root: Option<std::path::PathBuf>,
     ) -> Result<Vec<String>, ServiceError> {
+        self.configure_root_with_discovery_roots(root, None)
+    }
+
+    /// Configure a workspace while constraining disk discovery to exact
+    /// provider-selected roots. This keeps one resident service bound to an
+    /// Environment composition instead of silently scanning every sibling
+    /// checkout under a broad filesystem root.
+    pub fn configure_root_with_discovery_roots(
+        &self,
+        root: Option<std::path::PathBuf>,
+        discovery_roots: Option<Vec<std::path::PathBuf>>,
+    ) -> Result<Vec<String>, ServiceError> {
         let Some(root) = root else {
             self.store.set_root(None);
             if let Ok(mut checkpoint) = self.checkpoint.lock() {
@@ -855,7 +871,42 @@ impl LanguageService {
             .map_err(|error| ServiceError::WorkspaceUnavailable {
                 path: format!("{}: {error}", root.display()),
             })?;
+        let requested_roots = discovery_roots.unwrap_or_else(|| vec![root.clone()]);
+        if requested_roots.is_empty() {
+            return Err(ServiceError::WorkspaceUnavailable {
+                path: "selected source-root set is empty".to_owned(),
+            });
+        }
+        let mut normalized_roots = Vec::with_capacity(requested_roots.len());
+        for requested in requested_roots {
+            if !requested.is_absolute() {
+                return Err(ServiceError::WorkspaceUnavailable {
+                    path: format!(
+                        "selected source root is not absolute: {}",
+                        requested.display()
+                    ),
+                });
+            }
+            let selected =
+                requested
+                    .canonicalize()
+                    .map_err(|error| ServiceError::WorkspaceUnavailable {
+                        path: format!("{}: {error}", requested.display()),
+                    })?;
+            if !selected.starts_with(&root) || !selected.is_dir() {
+                return Err(ServiceError::WorkspaceUnavailable {
+                    path: format!(
+                        "selected source root escapes or is not a directory: {}",
+                        selected.display()
+                    ),
+                });
+            }
+            normalized_roots.push(selected);
+        }
+        normalized_roots.sort();
+        normalized_roots.dedup();
         let already_configured = self.store.workspace_root().as_deref() == Some(root.as_path())
+            && self.store.discovery_roots() == normalized_roots
             && self
                 .checkpoint
                 .lock()
@@ -867,9 +918,15 @@ impl LanguageService {
         }
 
         self.store.set_root(Some(root.clone()));
+        self.store
+            .set_discovery_roots(Some(normalized_roots.clone()));
         let checkpoint_path = workspace_checkpoint_path(&root);
         let checkpoint = load_workspace_checkpoint(&checkpoint_path, &root)?;
         let current_toolchain = crate::ambient::ToolchainIdentity::current();
+        let normalized_root_ids: Vec<String> = normalized_roots
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
         // A toolchain change invalidates stream continuity: identical bytes
         // under a different toolchain may mean different semantics, so the
         // restored cursor must not resume silently. Generation continuity
@@ -880,10 +937,21 @@ impl LanguageService {
             .and_then(|checkpoint| checkpoint.toolchain_identity.as_ref())
             .map(|bound| bound != &current_toolchain)
             .unwrap_or(false);
+        let prior_roots = checkpoint.as_ref().map(|checkpoint| {
+            if checkpoint.discovery_roots.is_empty() {
+                vec![root.display().to_string()]
+            } else {
+                checkpoint.discovery_roots.clone()
+            }
+        });
+        let roots_changed = prior_roots
+            .as_ref()
+            .is_some_and(|previous| previous != &normalized_root_ids);
+        let continuity_changed = toolchain_changed || roots_changed;
         if let Some(checkpoint) = checkpoint.as_ref() {
             self.store
                 .restore_generation_at_least(checkpoint.last_generation);
-            if !toolchain_changed {
+            if !continuity_changed {
                 self.events
                     .restore_stream(checkpoint.stream_identity.clone(), checkpoint.last_cursor);
             }
@@ -896,14 +964,18 @@ impl LanguageService {
                 last_generation: self.store.generation(),
                 last_cursor: self.events.current_cursor(),
                 documents: BTreeMap::new(),
+                discovery_roots: normalized_root_ids.clone(),
                 toolchain_identity: Some(current_toolchain.clone()),
             }));
-            if toolchain_changed {
+            if continuity_changed {
                 if let Some(writable) = writable.as_mut() {
                     writable.stream_identity = self.events.stream_identity();
                     writable.last_cursor = self.events.current_cursor();
                     writable.toolchain_identity = Some(current_toolchain.clone());
                 }
+            }
+            if let Some(writable) = writable.as_mut() {
+                writable.discovery_roots = normalized_root_ids;
             }
         }
 
@@ -949,11 +1021,23 @@ impl LanguageService {
                 last_generation: 0,
                 last_cursor: 0,
                 documents: BTreeMap::new(),
+                discovery_roots: self
+                    .store
+                    .discovery_roots()
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
                 toolchain_identity: Some(crate::ambient::ToolchainIdentity::current()),
             });
         checkpoint.last_generation = self.store.generation();
         checkpoint.last_cursor = self.events.current_cursor();
         checkpoint.documents = documents;
+        checkpoint.discovery_roots = self
+            .store
+            .discovery_roots()
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
         checkpoint.toolchain_identity = Some(crate::ambient::ToolchainIdentity::current());
         let raw = serde_json::to_vec_pretty(&checkpoint).map_err(|error| {
             ServiceError::InvalidRequest {
@@ -1337,6 +1421,14 @@ impl LanguageService {
     fn cached_any_snapshot(&self, uri: &str) -> Option<Arc<DocumentAnalysis>> {
         let analyses = self.analyses.read().ok()?;
         analyses.get(uri).map(|slot| Arc::clone(&slot.snapshot))
+    }
+
+    /// Return a cached analysis only when its source and dependencies are
+    /// current. Health/status projections use this to report measured state
+    /// without turning a readiness probe into a workspace-wide compile.
+    pub(crate) fn cached_snapshot_if_current(&self, uri: &str) -> Option<Arc<DocumentAnalysis>> {
+        let fingerprint = self.store.content_identity(uri).ok()?;
+        self.cached_snapshot(uri, &fingerprint)
     }
 
     pub fn document_diagnostics(&self, uri: &str) -> Result<DiagnosticsResponse, ServiceError> {

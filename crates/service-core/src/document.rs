@@ -109,6 +109,10 @@ impl Generations {
 pub struct DocumentStore {
     documents: RwLock<BTreeMap<String, Document>>,
     root: RwLock<Option<PathBuf>>,
+    /// Exact provider-selected source roots inside the workspace. `None`
+    /// preserves the standalone whole-root behavior used by LSP clients that
+    /// do not publish an Environment composition.
+    discovery_roots: RwLock<Option<Vec<PathBuf>>>,
     generations: Generations,
     /// Serializes disk scans.
     discovery_lock: Mutex<()>,
@@ -150,6 +154,7 @@ impl DocumentStore {
     pub fn new(root: Option<PathBuf>) -> Self {
         Self {
             root: RwLock::new(root),
+            discovery_roots: RwLock::new(None),
             documents: RwLock::new(BTreeMap::new()),
             generations: Generations::default(),
             discovery_lock: Mutex::new(()),
@@ -286,6 +291,29 @@ impl DocumentStore {
         if let Ok(mut current) = self.root.write() {
             *current = root;
         }
+        if let Ok(mut roots) = self.discovery_roots.write() {
+            *roots = None;
+        }
+    }
+
+    /// Bind source discovery to exact roots selected by the workspace owner.
+    /// The Language Service validates and canonicalizes these against its
+    /// configured workspace before setting them.
+    pub fn set_discovery_roots(&self, roots: Option<Vec<PathBuf>>) {
+        if let Ok(mut current) = self.discovery_roots.write() {
+            *current = roots;
+        }
+    }
+
+    /// Roots currently used for discovery. Standalone mode defaults to the
+    /// whole workspace root; composed mode reports the selected roots.
+    pub fn discovery_roots(&self) -> Vec<PathBuf> {
+        if let Ok(roots) = self.discovery_roots.read() {
+            if let Some(roots) = roots.as_ref() {
+                return roots.clone();
+            }
+        }
+        self.workspace_root().into_iter().collect()
     }
 
     pub fn generation(&self) -> u64 {
@@ -378,7 +406,10 @@ impl DocumentStore {
         }
 
         let mut discovered = Vec::new();
-        let mut stack = vec![root.to_path_buf()];
+        let mut stack = self.discovery_roots();
+        if stack.is_empty() {
+            stack.push(root.to_path_buf());
+        }
         while let Some(directory) = stack.pop() {
             if discovered.len() >= MAX_DISCOVERED_DOCUMENTS {
                 break;
@@ -391,12 +422,25 @@ impl DocumentStore {
                 let path = entry.path();
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if path.is_dir() {
+                // The Environment supplies exact selected repository roots.
+                // Do not let a symlink inside one selected checkout expand
+                // discovery into an unselected tree or create a directory
+                // cycle.
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_dir() {
                     if name.starts_with('.') || name == "target" || name == "node_modules" {
                         continue;
                     }
                     stack.push(path);
-                } else if name.ends_with(".mncs") && discovered.len() < MAX_DISCOVERED_DOCUMENTS {
+                } else if file_type.is_file()
+                    && name.ends_with(".mncs")
+                    && discovered.len() < MAX_DISCOVERED_DOCUMENTS
+                {
                     let uri = path_to_uri(&path);
                     let created = self
                         .ensure_document(&uri, Some(path))
@@ -1011,6 +1055,28 @@ mod tests {
             (*store.content(&found[0]).expect("lazy load")).clone(),
             "mncs 0.2;\n"
         );
+    }
+
+    #[test]
+    fn discovery_is_limited_to_selected_repository_roots() {
+        let dir = tempdir("selected-discover");
+        let selected = dir.join("selected");
+        let unselected = dir.join("unselected");
+        fs::create_dir_all(&selected).expect("selected root");
+        fs::create_dir_all(&unselected).expect("unselected root");
+        fs::write(selected.join("inside.mncs"), "mncs 0.2;\n").expect("selected source");
+        fs::write(unselected.join("outside.mncs"), "mncs 0.2;\n").expect("unselected source");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&unselected, selected.join("linked-unselected"))
+            .expect("selected-to-unselected symlink");
+
+        let store = DocumentStore::new(Some(dir.clone()));
+        store.set_discovery_roots(Some(vec![selected.clone()]));
+        let found = store.discover_workspace().expect("selected discovery");
+        assert_eq!(found.len(), 1);
+        assert!(found[0].ends_with("inside.mncs"));
+        assert!(!found[0].contains("outside.mncs"));
+        assert!(!found.iter().any(|uri| uri.contains("linked-unselected")));
     }
 
     #[test]

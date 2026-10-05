@@ -9,6 +9,20 @@ use std::sync::Arc;
 
 fn main() -> std::process::ExitCode {
     let root = std::env::var_os("MNLS_WORKSPACE_ROOT").map(PathBuf::from);
+    let repository_roots = match std::env::var("MNLS_WORKSPACE_REPOSITORY_ROOTS_JSON") {
+        Ok(raw) => match serde_json::from_str::<Vec<PathBuf>>(&raw) {
+            Ok(roots) => Some(roots),
+            Err(error) => {
+                eprintln!("mnls-language-service-host: invalid repository-root selection: {error}");
+                return std::process::ExitCode::FAILURE;
+            }
+        },
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            eprintln!("mnls-language-service-host: cannot read repository-root selection: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     let socket = std::env::var_os("MNLS_SERVICE_SOCKET")
         .map(PathBuf::from)
         .or_else(|| {
@@ -18,7 +32,9 @@ fn main() -> std::process::ExitCode {
         .unwrap_or_else(|| PathBuf::from(".mncs/mnls-language-service.sock"));
     let service = Arc::new(mncs_service_core::LanguageService::new(root.clone()));
     if let Some(root) = root {
-        if let Err(error) = service.configure_root(Some(root)) {
+        if let Err(error) =
+            service.configure_root_with_discovery_roots(Some(root), repository_roots)
+        {
             eprintln!("mnls-language-service-host: workspace unavailable: {error}");
             return std::process::ExitCode::FAILURE;
         }

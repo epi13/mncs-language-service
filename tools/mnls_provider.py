@@ -110,6 +110,38 @@ def resolve_workspace(raw: str) -> Path:
     return resolved
 
 
+def resolve_repository_roots(workspace: Path, raw: str | None) -> list[Path]:
+    """Validate the exact selected repository roots supplied by Environment.
+
+    Direct provider use defaults to the workspace itself. Environment callers
+    pass a stable JSON list of selected checkouts so a resident bound to a
+    broad workspace cannot silently scan unrelated repositories.
+    """
+    if raw is None:
+        return [workspace]
+    try:
+        values = json.loads(raw)
+    except ValueError as error:
+        fail(f"repository roots are not JSON: {error}", 2)
+    if not isinstance(values, list) or not values or any(not isinstance(item, str) for item in values):
+        fail("repository roots must be a nonempty JSON array of absolute paths", 2)
+    roots: list[Path] = []
+    for value in values:
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            fail(f"selected repository root is not absolute: {value}", 2)
+        try:
+            candidate = candidate.resolve(strict=True)
+        except OSError as error:
+            fail(f"selected repository root is unavailable: {value}: {error}", 2)
+        if not candidate.is_dir() or not candidate.is_relative_to(workspace):
+            fail(f"selected repository root escapes workspace or is not a directory: {candidate}", 2)
+        roots.append(candidate)
+    if len(set(roots)) != len(roots):
+        fail("selected repository roots contain duplicates", 2)
+    return sorted(roots)
+
+
 def socket_path(workspace: Path) -> Path:
     return workspace / ".mncs" / SOCKET_NAME
 
@@ -264,7 +296,7 @@ def rpc_call(sock: Path, method: str, params: dict, timeout: float) -> dict:
     return result
 
 
-def probe(workspace: Path, timeout: float) -> dict:
+def probe(workspace: Path, timeout: float, repository_roots: list[Path] | None = None) -> dict:
     """Resident probe with identity verification and disk convergence.
 
     Returns (state, service_status_doc_or_None, detail). The socket is
@@ -279,6 +311,7 @@ def probe(workspace: Path, timeout: float) -> dict:
     so the probe keeps read effects. A refused refresh (a refresh is
     already running) is tolerated; the status read still proceeds.
     """
+    expected_roots = repository_roots or [workspace]
     sock = socket_path(workspace)
     if not sock.exists():
         return ("absent", None, "no resident socket at the provider-owned path")
@@ -299,6 +332,16 @@ def probe(workspace: Path, timeout: float) -> dict:
                     f"resident workspace root is not {workspace}")
     except OSError:
         return ("foreign", observed, "resident workspace root does not resolve")
+    reported_roots = observed.get("workspace_repository_roots")
+    normalized_reported_roots: list[Path] = []
+    if isinstance(reported_roots, list) and all(isinstance(item, str) for item in reported_roots):
+        try:
+            normalized_reported_roots = sorted(Path(item).resolve() for item in reported_roots)
+        except OSError:
+            normalized_reported_roots = []
+    if normalized_reported_roots != expected_roots:
+        return ("stale-roots", observed,
+                "resident repository-root selection differs from the selected Environment checkouts")
     measured = language_toolchain()
     reported_digest = observed.get("toolchain_digest")
     if (isinstance(reported_digest, str) and reported_digest != measured["digest"]):
@@ -307,8 +350,9 @@ def probe(workspace: Path, timeout: float) -> dict:
     return ("ready", observed, "provider readiness contract satisfied")
 
 
-def status_document(workspace: Path, timeout: float) -> dict:
-    state, observed, detail = probe(workspace, timeout)
+def status_document(workspace: Path, timeout: float, repository_roots: list[Path] | None = None) -> dict:
+    selected_roots = repository_roots or [workspace]
+    state, observed, detail = probe(workspace, timeout, selected_roots)
     measured = language_toolchain()
     lease = read_lease(workspace)
     document: dict = {
@@ -319,6 +363,7 @@ def status_document(workspace: Path, timeout: float) -> dict:
         "observed_at": utcnow(),
         "selected": {
             "workspace_root": str(workspace),
+            "repository_roots": [str(path) for path in selected_roots],
             "toolchain": measured,
         },
         "socket": str(socket_path(workspace)),
@@ -352,6 +397,8 @@ def status_document(workspace: Path, timeout: float) -> dict:
             "stream_identity": observed.get("stream_identity"),
             "event_cursor": observed.get("event_cursor"),
             "documents": observed.get("documents"),
+            "workspace_repository_roots": observed.get("workspace_repository_roots"),
+            "analysis_pending": observed.get("analysis_pending"),
             "diagnostics_error": diagnostics.get("error"),
             "diagnostics_warning": diagnostics.get("warning"),
             "obligations_fail": obligations.get("fail"),
@@ -365,7 +412,8 @@ def status_document(workspace: Path, timeout: float) -> dict:
 
 def cmd_status(args: argparse.Namespace) -> int:
     workspace = resolve_workspace(args.workspace)
-    print(json.dumps(status_document(workspace, args.timeout), indent=2, sort_keys=True))
+    roots = resolve_repository_roots(workspace, args.repository_roots_json)
+    print(json.dumps(status_document(workspace, args.timeout, roots), indent=2, sort_keys=True))
     return 0
 
 
@@ -429,7 +477,8 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 def cmd_ensure(args: argparse.Namespace) -> int:
     workspace = resolve_workspace(args.workspace)
-    state, observed, detail = probe(workspace, args.timeout)
+    roots = resolve_repository_roots(workspace, args.repository_roots_json)
+    state, observed, detail = probe(workspace, args.timeout, roots)
     if state == "ready":
         assert observed is not None
         print(json.dumps({
@@ -460,7 +509,7 @@ def cmd_ensure(args: argparse.Namespace) -> int:
     # A live socket without an owned lease is never killed: it belongs to
     # another supervisor (or an operator) and must be stopped explicitly.
     lease = read_lease(workspace)
-    if state == "stale-toolchain":
+    if state in ("stale-toolchain", "stale-roots"):
         if not (isinstance(lease, dict) and lease.get("owned_by_provider")):
             print(json.dumps({
                 "state": "refused",
@@ -499,6 +548,8 @@ def cmd_ensure(args: argparse.Namespace) -> int:
     log_path = workspace / ".mncs" / "mnls-language-service.log"
     env = dict(os.environ)
     env["MNLS_WORKSPACE_ROOT"] = str(workspace)
+    env["MNLS_WORKSPACE_REPOSITORY_ROOTS_JSON"] = json.dumps(
+        [str(path) for path in roots], separators=(",", ":"))
     env["MNLS_SERVICE_SOCKET"] = str(sock)
     if measured["language_root"]:
         env.setdefault("MNCS_LANGUAGE_ROOT", measured["language_root"])
@@ -524,6 +575,7 @@ def cmd_ensure(args: argparse.Namespace) -> int:
         "pid": process.pid,
         "instance_id": None,
         "workspace_root": str(workspace),
+        "repository_roots": [str(path) for path in roots],
         "toolchain": measured,
         "started_at": utcnow(),
     })
@@ -542,7 +594,7 @@ def cmd_ensure(args: argparse.Namespace) -> int:
             print(json.dumps({"state": "start-failed", "detail": last_detail},
                              indent=2, sort_keys=True))
             return 4
-        state, observed, detail = probe(workspace, args.timeout)
+        state, observed, detail = probe(workspace, args.timeout, roots)
         last_detail = detail
         if state == "ready":
             assert observed is not None
@@ -571,15 +623,15 @@ def cmd_ensure(args: argparse.Namespace) -> int:
     return 4
 
 
-def require_ready(workspace: Path, timeout: float) -> None:
-    state, _, detail = probe(workspace, timeout)
+def require_ready(workspace: Path, timeout: float, repository_roots: list[Path] | None = None) -> None:
+    state, _, detail = probe(workspace, timeout, repository_roots)
     if state != "ready":
         fail(f"resident service is {state}: {detail}", 6 if state != "foreign" else 3)
 
 
 def cmd_poll(args: argparse.Namespace) -> int:
     workspace = resolve_workspace(args.workspace)
-    require_ready(workspace, args.timeout)
+    require_ready(workspace, args.timeout, resolve_repository_roots(workspace, args.repository_roots_json))
     params: dict = {"after_cursor": args.after, "max_events": args.max}
     if args.stream is not None:
         params["stream_identity"] = args.stream
@@ -593,7 +645,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
 def cmd_capsule(args: argparse.Namespace) -> int:
     workspace = resolve_workspace(args.workspace)
-    require_ready(workspace, args.timeout)
+    require_ready(workspace, args.timeout, resolve_repository_roots(workspace, args.repository_roots_json))
     params: dict = {"known_cursor": args.after}
     if args.stream is not None:
         params["known_stream_identity"] = args.stream
@@ -615,7 +667,7 @@ def cmd_query(args: argparse.Namespace) -> int:
         fail(f"params are not JSON: {error}", 2)
     if not isinstance(params, dict):
         fail("params must be a JSON object", 2)
-    require_ready(workspace, args.timeout)
+    require_ready(workspace, args.timeout, resolve_repository_roots(workspace, args.repository_roots_json))
     try:
         result = rpc_call(socket_path(workspace), args.method, params, args.timeout)
     except (OSError, RuntimeError) as error:
@@ -632,9 +684,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     status = sub.add_parser("status", help="read-only resident probe")
     status.add_argument("--workspace", required=True)
+    status.add_argument("--repository-roots-json", default=None)
     status.set_defaults(func=cmd_status)
     ensure = sub.add_parser("ensure", help="bounded resident reconcile")
     ensure.add_argument("--workspace", required=True)
+    ensure.add_argument("--repository-roots-json", default=None)
     ensure.add_argument("--start-timeout", type=float, default=30.0)
     ensure.set_defaults(func=cmd_ensure)
     stop = sub.add_parser("stop", help="stop an owned lease")
@@ -642,17 +696,20 @@ def build_parser() -> argparse.ArgumentParser:
     stop.set_defaults(func=cmd_stop)
     poll = sub.add_parser("poll", help="resume the resident event stream")
     poll.add_argument("--workspace", required=True)
+    poll.add_argument("--repository-roots-json", default=None)
     poll.add_argument("--stream", default=None)
     poll.add_argument("--after", type=int, default=0)
     poll.add_argument("--max", type=int, default=32)
     poll.set_defaults(func=cmd_poll)
     capsule = sub.add_parser("capsule", help="fetch the semantic capsule")
     capsule.add_argument("--workspace", required=True)
+    capsule.add_argument("--repository-roots-json", default=None)
     capsule.add_argument("--stream", default=None)
     capsule.add_argument("--after", type=int, default=0)
     capsule.set_defaults(func=cmd_capsule)
     query = sub.add_parser("query", help="invoke an allowlisted read-only RPC")
     query.add_argument("--workspace", required=True)
+    query.add_argument("--repository-roots-json", default=None)
     query.add_argument("--method", required=True)
     query.add_argument("--params", default="")
     query.set_defaults(func=cmd_query)

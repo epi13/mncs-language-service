@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 use crate::document::DocumentStore;
 use crate::error::ServiceError;
 use crate::modules::StoreResolver;
-use crate::queries::{ResponseStatus, SnapshotInfo};
+use crate::queries::{render_diagnostics, ResponseStatus, SnapshotInfo};
 
 pub const SERVICE_STATUS_SCHEMA_VERSION: &str = "mncs.language-service.service-status/1";
 pub const SEMANTIC_CAPSULE_SCHEMA_VERSION: &str = "mncs.language-service.semantic-capsule/1";
@@ -184,12 +184,20 @@ pub struct ServiceStatusResponse {
     pub schema_version: String,
     pub service: ServiceIdentity,
     pub workspace_root: Option<String>,
+    /// Exact roots included in resident source discovery. An Environment
+    /// selection change creates a new semantic stream epoch.
+    #[serde(default)]
+    pub workspace_repository_roots: Vec<String>,
     pub toolchain: ToolchainIdentity,
     pub toolchain_digest: String,
     pub generation: u64,
     pub stream_identity: String,
     pub event_cursor: u64,
     pub documents: usize,
+    /// Discovered documents without a current cached analysis. Readiness
+    /// probes report this instead of compiling every source document.
+    #[serde(default)]
+    pub analysis_pending: usize,
     pub diagnostics: DiagnosticTotals,
     pub obligations: ObligationTotals,
     pub readiness: ReadinessState,
@@ -243,11 +251,15 @@ pub struct CapsuleFinding {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MeasuredTotals {
     pub diagnostics: usize,
     pub changed_subjects: usize,
     pub obligations: usize,
     pub affected_modules: usize,
+    /// Resident documents without a current semantic analysis. Capsules do
+    /// not trigger workspace compilation to fill this gap.
+    pub analysis_pending_documents: usize,
     /// Candidates dropped before policy evaluation because the fixed
     /// envelope was full. Deterministic priority order keeps this stable.
     pub truncated_by_envelope: usize,
@@ -690,13 +702,14 @@ impl crate::queries::LanguageService {
     /// cheap on quiet generations (analysis cache reuse, no event replay).
     pub fn service_status(&self) -> Result<ServiceStatusResponse, ServiceError> {
         let workspace_root = self.store.workspace_root_path();
-        let mut unresolved = Vec::new();
+        let unresolved = Vec::new();
         let mut diagnostics = DiagnosticTotals::default();
         let mut obligations = ObligationTotals::default();
         let uris = self.store.document_uris();
+        let mut analysis_pending = 0;
         for uri in &uris {
-            match self.snapshot(uri) {
-                Ok(snapshot) => {
+            match self.cached_snapshot_if_current(uri) {
+                Some(snapshot) => {
                     for diagnostic in snapshot.diagnostics() {
                         match severity_rank(&format!("{:?}", diagnostic.severity).to_lowercase()) {
                             2 => diagnostics.error += 1,
@@ -720,9 +733,7 @@ impl crate::queries::LanguageService {
                         }
                     }
                 }
-                Err(_) => {
-                    unresolved.push(format!("snapshot unavailable for {uri}"));
-                }
+                None => analysis_pending += 1,
             }
         }
         let mut reasons = Vec::new();
@@ -734,6 +745,12 @@ impl crate::queries::LanguageService {
         };
         let toolchain = ToolchainIdentity::current();
         let (executable, build_fingerprint) = build_fingerprint();
+        let workspace_repository_roots = self
+            .store
+            .discovery_roots()
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
         Ok(ServiceStatusResponse {
             schema_version: SERVICE_STATUS_SCHEMA_VERSION.to_owned(),
             service: ServiceIdentity {
@@ -745,12 +762,14 @@ impl crate::queries::LanguageService {
                 build_fingerprint,
             },
             workspace_root,
+            workspace_repository_roots,
             toolchain_digest: toolchain.digest(),
             toolchain,
             generation: self.store.generation(),
             stream_identity: self.events.stream_identity(),
             event_cursor: self.events.current_cursor(),
             documents: uris.len(),
+            analysis_pending,
             diagnostics,
             obligations,
             readiness: ReadinessState { ready, reasons },
@@ -792,19 +811,19 @@ impl crate::queries::LanguageService {
         }
 
         let mut measured = MeasuredTotals::default();
-        let mut unresolved = Vec::new();
+        let unresolved = Vec::new();
 
-        // Current diagnostics across every resident snapshot.
+        // Measure only snapshots already resident and current. This endpoint
+        // is used by bounded ambient consumers; turning a cursor recovery
+        // call into analysis of every selected workspace document can outlive
+        // the caller's deadline while retaining a runaway compiler job.
         let mut diagnostic_rows: Vec<(i64, String, MeasuredFinding)> = Vec::new();
         for uri in self.store.document_uris() {
-            let response = match self.document_diagnostics(&uri) {
-                Ok(response) => response,
-                Err(_) => {
-                    unresolved.push(format!("diagnostics unavailable for {uri}"));
-                    continue;
-                }
+            let Some(snapshot) = self.cached_snapshot_if_current(&uri) else {
+                measured.analysis_pending_documents += 1;
+                continue;
             };
-            for item in response.items {
+            for item in render_diagnostics(&snapshot, &self.store) {
                 let rank = severity_rank(&item.severity);
                 measured.diagnostics += 1;
                 let key = format!("{}|{}|{}", item.code, uri, item.message);
@@ -883,33 +902,62 @@ impl crate::queries::LanguageService {
         // Non-pass obligations across every resident snapshot.
         let mut obligation_rows: Vec<MeasuredFinding> = Vec::new();
         for uri in self.store.document_uris() {
-            let response = match self.obligations(&uri, None) {
-                Ok(response) => response,
-                Err(_) => {
-                    unresolved.push(format!("obligations unavailable for {uri}"));
-                    continue;
-                }
+            let Some(snapshot) = self.cached_snapshot_if_current(&uri) else {
+                continue;
             };
-            for obligation in response.obligations {
-                let rank = match obligation.status.as_str() {
-                    "fail" => 2,
-                    "unknown" => 1,
+            let Some(program) = snapshot.front_end.program.as_ref() else {
+                continue;
+            };
+            for obligation in program.generate_obligations().obligations {
+                let rank = match &obligation.status {
+                    mncs_model::ObligationStatus::Fail => 2,
+                    mncs_model::ObligationStatus::Unknown => 1,
                     _ => continue,
                 };
                 measured.obligations += 1;
+                let identity = obligation.identity.0.clone();
                 obligation_rows.push(MeasuredFinding {
                     severity_rank: rank,
                     kind_rank: 2,
-                    key: obligation.identity.clone(),
+                    key: identity.clone(),
                     summary: format!(
                         "obligation {} is {}",
-                        obligation.identity, obligation.status
+                        identity,
+                        match obligation.status {
+                            mncs_model::ObligationStatus::Pass => "pass",
+                            mncs_model::ObligationStatus::Fail => "fail",
+                            mncs_model::ObligationStatus::Unknown => "unknown",
+                        }
                     ),
                     uri: Some(uri.clone()),
-                    identity: Some(obligation.identity.clone()),
+                    identity: Some(identity),
                     code: None,
                 });
             }
+        }
+
+        if measured.analysis_pending_documents > 0 {
+            let pending = measured.analysis_pending_documents;
+            return Ok(SemanticCapsuleResponse {
+                schema_version: SEMANTIC_CAPSULE_SCHEMA_VERSION.to_owned(),
+                status: ResponseStatus::Unsupported {
+                    reason: format!(
+                        "semantic capsule is incomplete: {pending} resident documents lack current cached analysis"
+                    ),
+                },
+                workspace_root: self.store.workspace_root_path(),
+                generation: self.store.generation(),
+                stream_identity: live_stream,
+                after_cursor: known_cursor,
+                current_cursor,
+                window_matched,
+                measured,
+                policy: None,
+                findings: Vec::new(),
+                unresolved: vec!["current workspace semantics are incomplete".to_owned()],
+                limitations,
+                snapshot: None,
+            });
         }
 
         // Deterministic priority order shared with the policy envelope:
@@ -1168,6 +1216,31 @@ impl crate::queries::LanguageService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct TempWorkspace(PathBuf);
+
+    impl TempWorkspace {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "mnls-selected-roots-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).expect("temporary workspace");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn kernel_selection(findings: &[(i64, i64)]) -> CapsuleSelection {
         let cache = RwLock::new(None);
@@ -1255,5 +1328,44 @@ mod tests {
             ..first.clone()
         };
         assert_ne!(first.digest(), changed.digest());
+    }
+
+    #[test]
+    fn status_is_lazy_and_selected_root_changes_start_a_new_stream() {
+        let workspace = TempWorkspace::new();
+        let root = &workspace.0;
+        let selected = root.join("selected");
+        let other = root.join("other");
+        fs::create_dir_all(&selected).expect("selected root");
+        fs::create_dir_all(&other).expect("other root");
+        fs::write(selected.join("selected.mncs"), "mncs 0.2;\n").expect("selected source");
+        fs::write(other.join("unselected.mncs"), "mncs 0.2;\n").expect("unselected source");
+
+        let first = crate::queries::LanguageService::new(Some(root.clone()));
+        let initial_roots = vec![selected.clone(), other.clone()];
+        first
+            .configure_root_with_discovery_roots(Some(root.clone()), Some(initial_roots))
+            .expect("configure selected root");
+        let first_status = first.service_status().expect("lazy service status");
+        assert_eq!(first_status.documents, 2);
+        assert_eq!(first_status.analysis_pending, 2);
+        let first_stream = first_status.stream_identity;
+        drop(first);
+
+        let second = crate::queries::LanguageService::new(Some(root.clone()));
+        second
+            .configure_root_with_discovery_roots(Some(root.clone()), Some(vec![other.clone()]))
+            .expect("reconfigure selected root");
+        let second_status = second.service_status().expect("second lazy status");
+        assert_eq!(second_status.documents, 1);
+        assert_eq!(second_status.analysis_pending, 1);
+        assert_eq!(
+            second_status.workspace_repository_roots,
+            vec![other.display().to_string()]
+        );
+        assert_ne!(
+            first_stream, second_status.stream_identity,
+            "a selected repository-set change cannot resume the old semantic stream"
+        );
     }
 }
