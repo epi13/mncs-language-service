@@ -9,6 +9,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
+#[path = "../../service-core/tests/common/fixture_workspace.rs"]
+mod fixture_workspace;
+
 use futures::StreamExt;
 fn offset_position(text: &str, needle: &str, plus_chars: usize) -> Position {
     let map = PositionMap::new(text);
@@ -24,7 +27,7 @@ use tower_lsp::lsp_types::Position;
 use tower_lsp::{ClientSocket, LspService};
 
 fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
+    fixture_workspace::root("../../tests/fixtures")
 }
 
 fn fixture_uri(name: &str) -> String {

@@ -11,6 +11,9 @@
 
 use std::path::PathBuf;
 
+#[path = "../../service-core/tests/common/fixture_workspace.rs"]
+mod fixture_workspace;
+
 use futures::StreamExt;
 use mncs_service_core::PositionMap;
 use tower::Service as _;
@@ -20,7 +23,7 @@ use tower_lsp::lsp_types::Position;
 use tower_lsp::{ClientSocket, LspService};
 
 fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
+    fixture_workspace::root("../../tests/fixtures")
 }
 
 fn golden_path() -> PathBuf {

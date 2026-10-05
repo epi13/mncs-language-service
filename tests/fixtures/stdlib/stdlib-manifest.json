@@ -1,0 +1,21 @@
+{
+  "schema_version": "mncs.stdlib-manifest/1",
+  "repository": "fixture",
+  "bundle_identity": "mncs:stdlib-bundle:fixture",
+  "bundle_path": "dist/stdlib-bundle.json",
+  "library_path": "library",
+  "requires_profile": {
+    "min": "0.5",
+    "max": "0.18"
+  },
+  "module_count": 1,
+  "modules": [
+    {
+      "name": "mncs.demo.widget.v1",
+      "path": "demo/widget.mncs",
+      "profile": "0.5",
+      "imports": [],
+      "content_sha256": "fixture"
+    }
+  ]
+}

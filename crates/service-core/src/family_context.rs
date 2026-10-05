@@ -30,7 +30,11 @@ const MANIFEST_VALIDATION_SCHEMA: &str = "mncs.standard.repository-manifest-vali
 const OBLIGATION_INVENTORY_SCHEMA: &str = "mncs-family.verification-obligation-inventory/v1";
 const MAX_CONTEXT_ITEMS: usize = 32;
 const LANGUAGE_AUTHORITY_ITEMS: usize = 256;
-const AUTHORITY_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
+// Commons validates and natively folds the complete pressure registry before
+// returning its bounded repository slice.  The measured warm query is about
+// 10.5 seconds in the selected workspace; keep this a strict bound with room
+// for scheduling variance instead of timing out a valid authority response.
+const AUTHORITY_QUERY_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_AUTHORITY_OUTPUT: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,7 +420,10 @@ pub fn query(
                 .to_owned(),
         );
     }
-    negative_knowledge.extend(negative_knowledge_from_manifest(local_repository.as_ref(), max_items));
+    negative_knowledge.extend(negative_knowledge_from_manifest(
+        local_repository.as_ref(),
+        max_items,
+    ));
     negative_knowledge.sort_by(|left, right| left.identity.cmp(&right.identity));
     negative_knowledge.dedup_by(|left, right| left.identity == right.identity);
     let complete = local_repository
@@ -616,7 +623,11 @@ fn load_verification_context(
     workspace: Option<&Path>,
     repository: Option<&RepositoryContext>,
     max_items: usize,
-) -> (VerificationContext, Vec<NegativeKnowledge>, Option<ContextSource>) {
+) -> (
+    VerificationContext,
+    Vec<NegativeKnowledge>,
+    Option<ContextSource>,
+) {
     let unavailable = |state: &str, limitation: String| {
         (
             VerificationContext {
@@ -666,9 +677,7 @@ fn load_verification_context(
     {
         return unavailable(
             "invalid",
-            format!(
-                "verification declaration must use {OBLIGATION_INVENTORY_SCHEMA}"
-            ),
+            format!("verification declaration must use {OBLIGATION_INVENTORY_SCHEMA}"),
         );
     }
     let Some(relative) = declaration
@@ -681,9 +690,11 @@ fn load_verification_context(
         );
     };
     let relative_path = Path::new(relative);
-    if relative_path.is_absolute() || relative_path.components().any(|component| {
-        matches!(component, std::path::Component::ParentDir)
-    }) {
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
         return unavailable(
             "invalid",
             "verification obligation inventory path is not a safe repository-relative path"
@@ -852,7 +863,9 @@ fn load_verification_context(
     }
     let mut limitations = Vec::new();
     if truncated {
-        limitations.push("verification obligation rows are bounded by the family context limit".to_owned());
+        limitations.push(
+            "verification obligation rows are bounded by the family context limit".to_owned(),
+        );
     }
     let state = if truncated { "truncated" } else { "current" };
     (

@@ -7,8 +7,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[path = "common/fixture_workspace.rs"]
+mod fixture_workspace;
+
 fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
+    fixture_workspace::root("../../tests/fixtures")
 }
 
 fn uri_for(name: &str) -> String {

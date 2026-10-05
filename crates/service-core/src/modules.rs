@@ -51,15 +51,86 @@ fn candidate_paths(root: &std::path::Path, module: &str) -> Vec<PathBuf> {
 
 /// Directories that may satisfy `use` targets beyond resident documents,
 /// read once per resolver construction from `MNCS_LIBRARY_PATH`
-/// (`:`-separated). This lets external consumers bind to `mncs.core.*`
-/// without vendoring the standard-library tree into every workspace.
+/// (`:`-separated), then standard-library roots from
+/// [`discover_stdlib_root`]. This lets external consumers bind to
+/// `mncs.core.*` without vendoring the standard-library tree into every
+/// workspace and without manual configuration when `mncs-stdlib` sits
+/// beside the workspace.
 fn library_roots_from_env() -> Vec<PathBuf> {
-    std::env::var("MNCS_LIBRARY_PATH")
+    let mut roots: Vec<PathBuf> = std::env::var("MNCS_LIBRARY_PATH")
         .unwrap_or_default()
         .split(':')
         .filter(|entry| !entry.is_empty())
         .map(PathBuf::from)
-        .collect()
+        .collect();
+    if let Some(stdlib) = discover_stdlib_root() {
+        let library = stdlib.join("library");
+        if !roots.iter().any(|root| root == &library) {
+            roots.push(library);
+        }
+    }
+    roots
+}
+
+/// Locates the `mncs-stdlib` checkout, mirroring the compiler CLI policy:
+/// an explicit `MNCS_STDLIB_ROOT` wins (an empty value disables stdlib
+/// discovery for hermetic sessions), otherwise `mncs-stdlib` beside the
+/// current directory or beside its parent is used when it carries a
+/// manifest. Returns the checkout root; the module tree lives under
+/// `<root>/library`.
+pub fn discover_stdlib_root() -> Option<PathBuf> {
+    if let Ok(explicit) = std::env::var("MNCS_STDLIB_ROOT") {
+        if explicit.is_empty() {
+            return None;
+        }
+        let root = PathBuf::from(explicit);
+        return root.join("stdlib-manifest.json").is_file().then_some(root);
+    }
+    let cwd = std::env::current_dir().ok()?;
+    for base in [cwd.as_path(), cwd.parent()?].iter() {
+        let candidate = base.join("mncs-stdlib");
+        if candidate.join("stdlib-manifest.json").is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// `(module name, required profile)` pairs from the discovered stdlib
+/// manifest, best-effort: an absent, unreadable, or wrong-schema manifest
+/// yields no names rather than an error, so completion degrades to local
+/// symbols.
+pub fn stdlib_manifest_modules() -> Vec<(String, String)> {
+    let Some(root) = discover_stdlib_root() else {
+        return Vec::new();
+    };
+    let Ok(bytes) = std::fs::read(root.join("stdlib-manifest.json")) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Vec::new();
+    };
+    if manifest.get("schema_version").and_then(|v| v.as_str()) != Some("mncs.stdlib-manifest/1") {
+        return Vec::new();
+    }
+    manifest
+        .get("modules")
+        .and_then(serde_json::Value::as_array)
+        .map(|modules| {
+            modules
+                .iter()
+                .filter_map(|entry| {
+                    let name = entry.get("name")?.as_str()?.to_owned();
+                    let profile = entry
+                        .get("profile")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("?")
+                        .to_owned();
+                    Some((name, profile))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Resolves imported module names against documents known to the store:

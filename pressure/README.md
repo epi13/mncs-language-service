@@ -27,6 +27,10 @@ workaround, and workaround cost.
 | [LS-P-004](LS-P-004.md) | No cancellation: analysis is synchronous and uninterruptible | CONFIRMED |
 | [LS-P-005](LS-P-005.md) | JSON-RPC/LSP framing must remain a Rust boundary | REJECTED-AS-PRESSURE |
 | [LS-P-006](LS-P-006.md) | Bounded symbol filtering via generic stdlib execution | VERIFIED |
+| [LS-P-007](LS-P-007.md) | Candidate analysis needs file-based machine params | OPEN |
+| [LS-P-008](LS-P-008.md) | Test fixtures assume the sibling-checkout layout | VERIFIED |
+| [LS-P-009](LS-P-009.md) | MNCS-native capsule admission policy | VERIFIED |
+| [LS-P-010](LS-P-010.md) | Cross-file navigation into stdlib sources | OPEN |
 
 ## Lifecycle rules
 
