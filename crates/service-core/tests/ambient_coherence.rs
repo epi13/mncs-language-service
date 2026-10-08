@@ -378,6 +378,74 @@ fn first_editor_change_analyzes_the_existing_disk_side_before_mutation() {
 }
 
 #[test]
+fn startup_reconciles_multiple_changed_documents_into_one_complete_checkpoint() {
+    let root = temp_workspace("startup-batched-reconcile");
+    seed_workspace(&root, &["valid-contracts.mncs", "finite-match.mncs"]);
+    let initial = LanguageService::new(None);
+    initial
+        .configure_root(Some(root.clone()))
+        .expect("initial root");
+    let initial_status = initial.service_status().expect("initial status");
+    assert_eq!(initial_status.event_cursor, 0);
+
+    let contracts_path = root.join("valid-contracts.mncs");
+    let contracts = fs::read_to_string(&contracts_path).expect("read contracts");
+    fs::write(
+        &contracts_path,
+        contracts.replace("return next;", "return next + 1;"),
+    )
+    .expect("edit contracts on disk");
+    let finite_path = root.join("finite-match.mncs");
+    let finite = fs::read_to_string(&finite_path).expect("read finite match");
+    fs::write(&finite_path, finite.replace("score >= 50", "score >= 51"))
+        .expect("edit finite match on disk");
+
+    let resumed = LanguageService::new(None);
+    resumed
+        .configure_root(Some(root.clone()))
+        .expect("reconcile changed documents");
+    let status = resumed.service_status().expect("resumed status");
+    assert_eq!(status.event_cursor, 2);
+    let replay = resumed.poll_events_for(Some(&status.stream_identity), 0, 8);
+    assert!(!replay.reset_required);
+    assert_eq!(replay.events.len(), 2);
+    assert!(replay.events.iter().all(|event| event.reconciled));
+    let event_uris: std::collections::BTreeSet<_> = replay
+        .events
+        .iter()
+        .map(|event| event.current.uri.as_str())
+        .collect();
+    assert_eq!(
+        event_uris,
+        [
+            workspace_uri(&root, "finite-match.mncs"),
+            workspace_uri(&root, "valid-contracts.mncs"),
+        ]
+        .iter()
+        .map(String::as_str)
+        .collect()
+    );
+
+    let checkpoint_path = root
+        .join(".mncs")
+        .join("mnls-language-service.checkpoint.json");
+    let checkpoint: serde_json::Value =
+        serde_json::from_slice(&fs::read(checkpoint_path).expect("read persisted checkpoint"))
+            .expect("decode persisted checkpoint");
+    assert_eq!(checkpoint["last_cursor"], 2);
+    assert_eq!(checkpoint["documents"].as_object().unwrap().len(), 2);
+    for name in ["finite-match.mncs", "valid-contracts.mncs"] {
+        let uri = workspace_uri(&root, name);
+        assert_eq!(
+            checkpoint["documents"][&uri],
+            resumed
+                .content_fingerprint(&uri)
+                .expect("current content identity")
+        );
+    }
+}
+
+#[test]
 fn restart_restores_stream_but_toolchain_change_forces_a_new_epoch() {
     let root = temp_workspace("restart");
     seed_workspace(&root, &["valid-contracts.mncs"]);

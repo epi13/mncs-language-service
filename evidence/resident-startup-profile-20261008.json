@@ -1,0 +1,246 @@
+{
+  "schema_version": "mncs.language-service.resident-startup-profile/1",
+  "recorded_at": "2026-10-08T22:42:33Z",
+  "owner": "mncs-language-service",
+  "source_revision": "4e090e248d57b71d6b74dd227247ac91336edaa5",
+  "branch": "campaign/language-service-startup-profile-20261008",
+  "service_build": {
+    "small_workspace_test_binary_sha256": "sha256:b4faa09b3ada82fdcaed4feaf2e5aefbc1a470ea1e3776966908bdcce94e92d1",
+    "debug_binary_bytes": 110623112,
+    "mncs_language_dependency_before": "21da3938531a85f36d00eb50652eb8005e719751",
+    "mncs_language_dependency_after": "b05dfa2b91541e4bd4a75aecff6abdedd708608e",
+    "selected_toolchain_pin": "mncs-language:b05dfa2b91541e4bd4a75aecff6abdedd708608e",
+    "lock_alignment": "all four MNCS crates now resolve to the selected language revision"
+  },
+  "workspace": {
+    "root": "/home/epi13/Documents/Projects",
+    "selected_repository_roots": 14,
+    "checkpoint_bytes": 2356217,
+    "checkpoint_generation_before_and_after": 119,
+    "checkpoint_cursor_before_and_after": 6,
+    "checkpoint_documents": 541,
+    "reconcile": {
+      "discovered_candidates": 542,
+      "read_documents": 541,
+      "scanned_bytes": 3507107,
+      "changed_documents": 7,
+      "discovery_us": 7576,
+      "read_us": 3159,
+      "source_envelope_seal_us": 160469,
+      "total_us": 175429
+    },
+    "first_changed_document": {
+      "path": "mncs-compiler/src/compiler/decl.mncs",
+      "bytes": 820881,
+      "content_sha256": "f2dd1f842e8747c408f9918d7611afeba0b45c2ae15f1467acb13b72fee9691f",
+      "git_blob": "22e1c4c8ad9da3547b9b7595ccd8c7b095c5b16c",
+      "expected_generation": 126
+    },
+    "two_document_batch_fixture": {
+      "changed_documents": 2,
+      "snapshot_elapsed_us": [17813, 12323],
+      "checkpoint_writes_after_reconcile": 1,
+      "checkpoint_write_elapsed_us": 1605,
+      "checkpoint_encoded_bytes": 3633,
+      "test_assertions": [
+        "both reconciled events remain in the current stream",
+        "both current source identities are in the durable checkpoint"
+      ]
+    }
+  },
+  "fingerprint_cost": {
+    "input": "105 MB ambient-coherence test executable; first fingerprint in a fresh process",
+    "unoptimized_sha2": {
+      "fingerprint_elapsed_us": 3970620,
+      "whole_test_process_wall_seconds": 4.01,
+      "whole_test_process_cpu_user_seconds": 3.98,
+      "whole_test_process_max_rss_kb_after_streaming_change": 21532,
+      "original_whole_image_read_peak_rss": "UNKNOWN; not sampled before the streaming change"
+    },
+    "optimized_sha2_dev_and_test_profiles": {
+      "fingerprint_elapsed_us": 401587,
+      "whole_test_process_wall_seconds": 0.43,
+      "whole_test_process_cpu_user_seconds": 0.41,
+      "whole_test_process_max_rss_kb": 22892
+    },
+    "comparison": {
+      "fingerprint_wall_reduction_percent": 89.9,
+      "process_cpu_reduction_percent": 89.7,
+      "measured_memory_reduction": "UNKNOWN"
+    }
+  },
+  "real_workspace_attempts": [
+    {
+      "attempt": "before-lock-alignment",
+      "environment_session": "ses_057b96a7150a570f",
+      "capability": "mncs-language-service:resident-reconcile",
+      "provider_start_timeout_seconds": 20,
+      "environment_invoke_wall_seconds": 26.124,
+      "provider_result": "TIMEOUT",
+      "provider_return_code": 4,
+      "host_pid": 2939578,
+      "host_process": {
+        "cpu_user_seconds_at_last_sample": 19.78,
+        "cpu_system_seconds_at_last_sample": 0.08,
+        "rss_high_water_kb": 30844,
+        "max_file_descriptors": 4,
+        "threads": 1,
+        "proc_io_at_last_sample": {
+          "rchar": 104980135,
+          "wchar": 1140,
+          "read_bytes": 4096,
+          "write_bytes": 4096
+        }
+      },
+      "last_completed_profile_event": "checkpoint_reconcile",
+      "in_flight_operation": {
+        "phase": "changed_document_snapshot",
+        "path": "mncs-compiler/src/compiler/decl.mncs",
+        "bytes": 820881
+      },
+      "post_bind_socket_ready_line": false,
+      "semantic_outcome": "UNKNOWN"
+    },
+    {
+      "attempt": "after-lock-alignment",
+      "environment_session": "ses_057b96a7150a570f",
+      "capability": "mncs-language-service:resident-reconcile",
+      "provider_start_timeout_seconds": 20,
+      "environment_invoke_wall_seconds": 25.414,
+      "provider_result": "TIMEOUT",
+      "provider_return_code": 4,
+      "host_pid": 2940983,
+      "host_process": {
+        "cpu_user_seconds_at_last_sample": 19.77,
+        "cpu_system_seconds_at_last_sample": 0.02,
+        "rss_high_water_kb": 30364,
+        "max_file_descriptors": 4,
+        "threads": 1,
+        "proc_io_at_last_sample": {
+          "rchar": 116474063,
+          "wchar": 1140,
+          "read_bytes": 0,
+          "write_bytes": 8192
+        }
+      },
+      "cgroup": {
+        "path": "/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.kde.konsole-320048.scope/tab(320111).scope",
+        "memory_max": "max",
+        "cpu_max": "max 100000",
+        "memory_events_oom": 0,
+        "memory_events_oom_kill_before_and_after": 4,
+        "oom_kill_delta": 0,
+        "classification": "provider_timeout; no cgroup OOM evidence"
+      },
+      "profile_events": [
+        {
+          "event": "checkpoint_load",
+          "elapsed_us": 29186,
+          "bytes": 2356217
+        },
+        {
+          "event": "toolchain_identity",
+          "elapsed_us": 56,
+          "digest": "sha256:c96e3eaf317d9452a56fd6ff96ab44b7cb617019d364e6282b14009e87193b03"
+        },
+        {
+          "event": "service_build_fingerprint",
+          "elapsed_us": 420406,
+          "fingerprint": "sha256:36a3960805a41df757719df4944b51e7ca17684c2636ea8c343dd2aa16c4c6c2"
+        },
+        {
+          "event": "checkpoint_reconcile",
+          "total_us": 175902,
+          "candidate_documents": 542,
+          "read_documents": 541,
+          "scanned_bytes": 3507107,
+          "changed_documents": 7
+        },
+        {
+          "event": "changed_document_snapshot_started",
+          "path": "mncs-compiler/src/compiler/decl.mncs",
+          "source_bytes": 820881,
+          "expected_generation": 126
+        }
+      ],
+      "post_bind_socket_ready_line": false,
+      "semantic_outcome": "UNKNOWN"
+    },
+    {
+      "attempt": "stage-timing-localization",
+      "environment_session": "ses_057b96a7150a570f",
+      "capability": "mncs-language-service:resident-reconcile",
+      "provider_start_timeout_seconds": 10,
+      "mncs_timings_enabled": true,
+      "environment_invoke_wall_seconds": 15.47,
+      "provider_result": "TIMEOUT",
+      "provider_return_code": 4,
+      "host_pid": 2941309,
+      "host_cpu_seconds_at_last_sample": 9.28,
+      "host_rss_high_water_kb": 27664,
+      "max_file_descriptors": 3,
+      "completed_compiler_timing_events": [],
+      "last_profile_event": "changed_document_snapshot_started for decl.mncs",
+      "post_bind_socket_ready_line": false,
+      "classification": "the ReferenceCompiler parse call did not return within the 10-second observation; parser subphase remains UNKNOWN"
+    }
+  ],
+  "small_workspace_integration": {
+    "result": "SUCCESS",
+    "workspace_documents": 0,
+    "elapsed_seconds": 0.445,
+    "socket_bound": true,
+    "service_status_rpc_ready": true,
+    "post_bind_ready_log_confirmed": true,
+    "build_fingerprint_elapsed_us": 419071,
+    "workspace_configuration_elapsed_us": 423077,
+    "loaded_image_sha256_matches_binary_file": true,
+    "temporary_workspace_removed": true
+  },
+  "cancellation_and_recovery": {
+    "provider_owned_stop_result": "stopped",
+    "dead_lease_reclaimed": true,
+    "socket_present_after_cleanup": false,
+    "lease_present_after_cleanup": false,
+    "all_sampled_host_pids_gone": true
+  },
+  "source_code_hypothesis": {
+    "status": "UNCONFIRMED",
+    "owner": "mncs-language / mncs-syntax",
+    "observation": "mncs-syntax::lex assigns SourceSpan::at(source,start,end) per token; SourceSpan::at rescans the source prefix for line and column. This is a plausible repeated-prefix cost on the 820881-byte declaration file.",
+    "next_evidence_needed": "separate lex and parser timings or counters on the same exact input before changing the lexer"
+  },
+  "tests": [
+    {
+      "command": "cargo test -p mncs-service-core --test ambient_coherence",
+      "result": "PASS",
+      "summary": "12 passed"
+    },
+    {
+      "command": "cargo test -p mncs-service-core --test resident_transport",
+      "result": "PASS",
+      "summary": "5 passed"
+    },
+    {
+      "command": "cargo test -p mncs-service-core streamed_build_fingerprint_matches_whole_image_sha256",
+      "result": "PASS",
+      "summary": "1 passed"
+    },
+    {
+      "command": "python3 tools/test_mnls_provider.py",
+      "result": "PASS",
+      "summary": "28 passed"
+    },
+    {
+      "command": "cargo build -p mncs-service-core --bin mnls-language-service-host",
+      "result": "PASS",
+      "summary": "debug host compiled with the lock aligned to mncs-language b05dfa2b"
+    }
+  ],
+  "limitations": [
+    "The real workspace did not produce a semantic result; no diagnostic, proof, CFG, or SSA rejection is established.",
+    "VM steps are not applicable to the in-flight Rust frontend call; exact semantic phase remains UNKNOWN.",
+    "The old whole-image hashing implementation's peak RSS was not measured, so no memory reduction percentage is claimed.",
+    "The historical stack-overflow lines in the append-only provider log were not emitted by these attempts and remain unattributed."
+  ]
+}

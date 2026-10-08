@@ -733,6 +733,7 @@ impl LanguageService {
                     generation,
                     None,
                     false,
+                    true,
                 )? {
                     published.push(cursor);
                 }
@@ -769,6 +770,7 @@ impl LanguageService {
                     generation,
                     before,
                     false,
+                    true,
                 )?
             };
             if let Some(cursor) = cursor {
@@ -785,8 +787,31 @@ impl LanguageService {
         expected_generation: u64,
         before: Option<Arc<DocumentAnalysis>>,
         reconciled: bool,
+        persist_checkpoint: bool,
     ) -> Result<Option<u64>, ServiceError> {
+        let snapshot_started = std::time::Instant::now();
+        let source_bytes = self.store.content(uri).map(|text| text.len()).unwrap_or(0);
+        crate::startup_profile::emit(
+            "changed_document_snapshot_started",
+            serde_json::json!({
+                "uri": uri,
+                "source_bytes": source_bytes,
+                "expected_generation": expected_generation,
+                "reconciled": reconciled,
+            }),
+        );
         let after = self.snapshot(uri)?;
+        crate::startup_profile::emit(
+            "changed_document_snapshot",
+            serde_json::json!({
+                "uri": uri,
+                "source_bytes": source_bytes,
+                "source_identity": after.source_identity.as_str(),
+                "generation": after.generation,
+                "reconciled": reconciled,
+                "elapsed_us": crate::startup_profile::elapsed_us(snapshot_started),
+            }),
+        );
         // ReferenceCompiler is synchronous and cannot be interrupted.  The
         // generation check is therefore the authoritative stale-work guard:
         // an analysis that finished after a newer edit is never published as
@@ -805,7 +830,9 @@ impl LanguageService {
         );
         let cursor = self.events.push(event);
         self.evict_stale_analyses();
-        self.persist_checkpoint()?;
+        if persist_checkpoint {
+            self.persist_checkpoint()?;
+        }
         Ok(Some(cursor))
     }
 
@@ -848,7 +875,7 @@ impl LanguageService {
     pub fn did_open(&self, uri: &str, version: i32, text: String) -> Result<u64, ServiceError> {
         let (replaced_generation, before) = self.begin_change(uri);
         let generation = self.store.did_open(uri, version, text)?;
-        let _ = self.observe_change(uri, replaced_generation, generation, before, false)?;
+        let _ = self.observe_change(uri, replaced_generation, generation, before, false, true)?;
         Ok(generation)
     }
 
@@ -864,7 +891,7 @@ impl LanguageService {
     ) -> Result<u64, ServiceError> {
         let (replaced_generation, before) = self.begin_change(uri);
         let generation = self.store.did_change_incremental(uri, version, changes)?;
-        let _ = self.observe_change(uri, replaced_generation, generation, before, false)?;
+        let _ = self.observe_change(uri, replaced_generation, generation, before, false, true)?;
         Ok(generation)
     }
 
@@ -874,7 +901,7 @@ impl LanguageService {
         if generation == replaced_generation {
             return Ok(generation);
         }
-        let _ = self.observe_change(uri, replaced_generation, generation, before, false)?;
+        let _ = self.observe_change(uri, replaced_generation, generation, before, false, true)?;
         Ok(generation)
     }
 
@@ -883,7 +910,8 @@ impl LanguageService {
         let content = self.store.did_close(uri)?;
         if content.is_some() {
             let generation = self.store.generation();
-            let _ = self.observe_change(uri, replaced_generation, generation, before, false)?;
+            let _ =
+                self.observe_change(uri, replaced_generation, generation, before, false, true)?;
         } else {
             self.evict_stale_analyses();
         }
@@ -913,6 +941,7 @@ impl LanguageService {
         root: Option<std::path::PathBuf>,
         discovery_roots: Option<Vec<std::path::PathBuf>>,
     ) -> Result<Vec<String>, ServiceError> {
+        let configure_started = std::time::Instant::now();
         let Some(root) = root else {
             self.store.set_root(None);
             if let Ok(mut checkpoint) = self.checkpoint.lock() {
@@ -975,9 +1004,34 @@ impl LanguageService {
         self.store
             .set_discovery_roots(Some(normalized_roots.clone()));
         let checkpoint_path = workspace_checkpoint_path(&root);
+        let checkpoint_load_started = std::time::Instant::now();
         let checkpoint = load_workspace_checkpoint(&checkpoint_path, &root)?;
+        crate::startup_profile::emit(
+            "checkpoint_load",
+            serde_json::json!({
+                "exists": checkpoint_path.exists(),
+                "bytes": fs::metadata(&checkpoint_path).map(|metadata| metadata.len()).unwrap_or(0),
+                "elapsed_us": crate::startup_profile::elapsed_us(checkpoint_load_started),
+            }),
+        );
+        let toolchain_started = std::time::Instant::now();
         let current_toolchain = crate::ambient::ToolchainIdentity::current();
+        crate::startup_profile::emit(
+            "toolchain_identity",
+            serde_json::json!({
+                "digest": current_toolchain.digest(),
+                "elapsed_us": crate::startup_profile::elapsed_us(toolchain_started),
+            }),
+        );
+        let build_fingerprint_started = std::time::Instant::now();
         let (_, current_service_build) = crate::ambient::build_fingerprint();
+        crate::startup_profile::emit(
+            "service_build_fingerprint",
+            serde_json::json!({
+                "fingerprint": current_service_build.as_str(),
+                "elapsed_us": crate::startup_profile::elapsed_us(build_fingerprint_started),
+            }),
+        );
         let normalized_root_ids: Vec<String> = normalized_roots
             .iter()
             .map(|path| path.display().to_string())
@@ -1047,11 +1101,30 @@ impl LanguageService {
         let changed = self
             .store
             .reconcile_checkpoint(checkpoint.as_ref().map(|value| &value.documents))?;
+        // Reconciliation assigns one generation per changed file, but all
+        // resulting snapshots describe the final workspace generation. If
+        // each item checked its individual generation here, the first N-1
+        // events would be discarded as stale after the last file advanced
+        // the shared generation counter.
+        let reconciled_generation = self.store.generation();
         for (uri, generation) in changed {
-            let _ =
-                self.observe_change(&uri, generation.saturating_sub(1), generation, None, true)?;
+            let _ = self.observe_change(
+                &uri,
+                generation.saturating_sub(1),
+                reconciled_generation,
+                None,
+                true,
+                false,
+            )?;
         }
         self.persist_checkpoint()?;
+        crate::startup_profile::emit(
+            "workspace_configured",
+            serde_json::json!({
+                "documents": self.store.document_uris().len(),
+                "elapsed_us": crate::startup_profile::elapsed_us(configure_started),
+            }),
+        );
         Ok(self.store.document_uris())
     }
 
@@ -1067,11 +1140,13 @@ impl LanguageService {
     }
 
     fn persist_checkpoint(&self) -> Result<(), ServiceError> {
+        let persist_started = std::time::Instant::now();
         let Some(root) = self.store.workspace_root() else {
             return Ok(());
         };
         let path = workspace_checkpoint_path(&root);
         let documents = self.checkpoint_identities();
+        let document_count = documents.len();
         let mut checkpoint = self
             .checkpoint
             .lock()
@@ -1145,6 +1220,14 @@ impl LanguageService {
         if let Ok(mut writable) = self.checkpoint.lock() {
             *writable = Some(checkpoint);
         }
+        crate::startup_profile::emit(
+            "checkpoint_persisted",
+            serde_json::json!({
+                "documents": document_count,
+                "encoded_bytes": raw.len(),
+                "elapsed_us": crate::startup_profile::elapsed_us(persist_started),
+            }),
+        );
         Ok(())
     }
 

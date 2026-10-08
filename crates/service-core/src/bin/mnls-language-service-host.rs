@@ -39,10 +39,6 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     }
-    eprintln!(
-        "mnls-language-service-host: resident service listening at {}",
-        socket.display()
-    );
     if let Err(error) = mncs_service_core::serve_unix(&socket, service) {
         eprintln!("mnls-language-service-host: fatal: {error}");
         return std::process::ExitCode::FAILURE;

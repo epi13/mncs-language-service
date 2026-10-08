@@ -123,6 +123,22 @@ pub(crate) fn new_instance_id() -> String {
     format!("mnls-{}-{nanos}", std::process::id())
 }
 
+fn file_fingerprint(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+
+    let mut image = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = image.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Some(format!("sha256:{:x}", hasher.finalize()))
+}
+
 pub(crate) fn build_fingerprint() -> (Option<String>, String) {
     let executable = std::env::current_exe()
         .ok()
@@ -132,13 +148,12 @@ pub(crate) fn build_fingerprint() -> (Option<String>, String) {
         // On Linux this names the image actually loaded by this process,
         // including when the path was replaced after startup. Other targets
         // fall back to current_exe. Failure remains explicitly unknown.
-        let image = std::fs::read("/proc/self/exe").ok().or_else(|| {
-            executable
-                .as_deref()
-                .and_then(|path| std::fs::read(path).ok())
-        });
-        image
-            .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))
+        file_fingerprint(std::path::Path::new("/proc/self/exe"))
+            .or_else(|| {
+                executable
+                    .as_deref()
+                    .and_then(|path| file_fingerprint(std::path::Path::new(path)))
+            })
             .unwrap_or_else(|| "unknown".to_owned())
     });
     (executable, fingerprint.clone())
@@ -1247,6 +1262,18 @@ mod tests {
         let store = DocumentStore::new(None);
         execute_capsule_selection(&cache, &store, findings, findings.len())
             .expect("capsule policy executes")
+    }
+
+    #[test]
+    fn streamed_build_fingerprint_matches_whole_image_sha256() {
+        use sha2::Digest;
+
+        let workspace = TempWorkspace::new();
+        let path = workspace.0.join("service-image.bin");
+        let image: Vec<u8> = (0..1_000_003).map(|index| (index % 251) as u8).collect();
+        fs::write(&path, &image).expect("write fingerprint fixture");
+        let expected = format!("sha256:{:x}", Sha256::digest(&image));
+        assert_eq!(file_fingerprint(&path).as_deref(), Some(expected.as_str()));
     }
 
     #[test]

@@ -32,3 +32,12 @@ schemars = "1"
 
 [profile.release]
 lto = "thin"
+
+# The resident service hashes its loaded executable to bind semantic
+# continuity. Keep SHA-256 optimized in debug/test hosts as well: an
+# unoptimized pass over a 105 MB test image measured 3.97 s wall / 3.98 s CPU.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.test.package.sha2]
+opt-level = 3

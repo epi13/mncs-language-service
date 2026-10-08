@@ -1368,6 +1368,10 @@ pub fn serve_unix(path: impl AsRef<Path>, service: Arc<LanguageService>) -> std:
         std::fs::create_dir_all(parent)?;
     }
     let listener = std::os::unix::net::UnixListener::bind(path)?;
+    eprintln!(
+        "mnls-language-service-host: resident service listening at {}",
+        path.display()
+    );
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let service = Arc::clone(&service);

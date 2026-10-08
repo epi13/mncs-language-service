@@ -332,7 +332,10 @@ impl DocumentStore {
         &self,
         checkpoint: Option<&BTreeMap<String, String>>,
     ) -> Result<Vec<(String, u64)>, ServiceError> {
+        let reconcile_started = std::time::Instant::now();
+        let discovery_started = std::time::Instant::now();
         self.discover_workspace_impl(false)?;
+        let discovery_us = crate::startup_profile::elapsed_us(discovery_started);
         let candidates: Vec<(String, PathBuf, bool)> = self
             .read_documents()?
             .iter()
@@ -341,18 +344,30 @@ impl DocumentStore {
                 Some((uri.clone(), path, document.open()))
             })
             .collect();
+        let candidate_count = candidates.len();
+        let mut read_count = 0usize;
+        let mut scanned_bytes = 0u64;
+        let mut read_us = 0u64;
+        let mut seal_us = 0u64;
         let mut changed = Vec::new();
         for (uri, path, open) in candidates {
             if open {
                 continue;
             }
+            let read_started = std::time::Instant::now();
             let Ok(text) = fs::read_to_string(&path) else {
+                read_us = read_us.saturating_add(crate::startup_profile::elapsed_us(read_started));
                 continue;
             };
+            read_us = read_us.saturating_add(crate::startup_profile::elapsed_us(read_started));
             if text.len() > MAX_DOCUMENT_BYTES {
                 continue;
             }
+            read_count = read_count.saturating_add(1);
+            scanned_bytes = scanned_bytes.saturating_add(text.len() as u64);
+            let seal_started = std::time::Instant::now();
             let sealed = Self::seal_content(&uri, text);
+            seal_us = seal_us.saturating_add(crate::startup_profile::elapsed_us(seal_started));
             let differs = checkpoint
                 .map(|values| values.get(&uri) != Some(&sealed.identity))
                 .unwrap_or(false);
@@ -379,6 +394,19 @@ impl DocumentStore {
                 changed.push((uri, self.generations.next()));
             }
         }
+        crate::startup_profile::emit(
+            "checkpoint_reconcile",
+            serde_json::json!({
+                "discovery_us": discovery_us,
+                "candidate_documents": candidate_count,
+                "read_documents": read_count,
+                "scanned_bytes": scanned_bytes,
+                "read_us": read_us,
+                "source_envelope_seal_us": seal_us,
+                "changed_documents": changed.len(),
+                "total_us": crate::startup_profile::elapsed_us(reconcile_started),
+            }),
+        );
         Ok(changed)
     }
 

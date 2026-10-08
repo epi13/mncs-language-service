@@ -32,6 +32,7 @@ mod native_query;
 mod queries;
 mod rename;
 mod render;
+mod startup_profile;
 mod workspace_index;
 
 pub use actions::{CodeAction, CodeActionsResponse};
