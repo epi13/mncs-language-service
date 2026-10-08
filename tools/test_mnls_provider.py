@@ -526,15 +526,13 @@ class SocketSafetyTests(unittest.TestCase):
 
     def test_stop_does_not_signal_pid_with_mismatched_process_identity(self) -> None:
         workspace = self.workspace()
-        socket_path = PROVIDER_MODULE.socket_path(workspace)
-        socket_path.write_text("socket placeholder")
         lease_path = PROVIDER_MODULE.lease_path(workspace)
         lease_path.write_text("lease placeholder")
         lease = {
             "owned_by_provider": True,
             "workspace_root": str(workspace),
             "pid": 912345,
-            "instance_id": "resident-1",
+            "instance_id": None,
             "process_identity": {
                 "pid": 912345,
                 "pid_namespace_inode": 4,
@@ -558,7 +556,7 @@ class SocketSafetyTests(unittest.TestCase):
             result = PROVIDER_MODULE.terminate_owned(workspace, lease, 1.0)
         self.assertEqual(result["state"], "refused")
         send_signal.assert_not_called()
-        self.assertTrue(socket_path.exists())
+        self.assertFalse(PROVIDER_MODULE.socket_path(workspace).exists())
         self.assertTrue(lease_path.exists())
 
     def test_stop_live_resident_with_denied_socket_preserves_owned_state(self) -> None:
@@ -623,6 +621,122 @@ class SocketSafetyTests(unittest.TestCase):
         send_signal.assert_called_once_with(65, PROVIDER_MODULE.signal.SIGTERM)
         self.assertFalse(socket_path.exists())
         self.assertFalse(lease_path.exists())
+
+    def test_stop_cancels_exact_provider_owned_prebind_process_without_socket(self) -> None:
+        workspace = self.workspace()
+        lease_path = PROVIDER_MODULE.lease_path(workspace)
+        identity = {
+            "pid": 912345,
+            "pid_namespace_inode": 4,
+            "start_ticks": 10,
+            "executable_sha256": "sha256:current",
+        }
+        lease = {"owned_by_provider": True, "workspace_root": str(workspace),
+                 "pid": 912345, "instance_id": None,
+                 "process_identity": identity}
+        lease_path.write_text(json.dumps(lease))
+        with mock.patch.object(PROVIDER_MODULE, "pid_alive", return_value=True), mock.patch.object(
+            PROVIDER_MODULE.os, "pidfd_open", return_value=66,
+        ), mock.patch.object(
+            PROVIDER_MODULE, "current_process_identity", return_value=identity,
+        ), mock.patch.object(
+            PROVIDER_MODULE, "rpc_call",
+            side_effect=AssertionError("pre-bind cancellation must not require a socket"),
+        ), mock.patch.object(PROVIDER_MODULE, "pidfd_exited", return_value=True), mock.patch.object(
+            PROVIDER_MODULE.os, "close",
+        ), mock.patch.object(PROVIDER_MODULE.signal, "pidfd_send_signal") as send_signal:
+            result = PROVIDER_MODULE.terminate_owned(workspace, lease, 1.0)
+        self.assertEqual(result["state"], "stopped")
+        send_signal.assert_called_once_with(66, PROVIDER_MODULE.signal.SIGTERM)
+        self.assertFalse(PROVIDER_MODULE.socket_path(workspace).exists())
+        self.assertFalse(lease_path.exists())
+
+    def test_stop_cancels_real_provider_owned_prebind_process(self) -> None:
+        workspace = self.workspace()
+        lease_path = PROVIDER_MODULE.lease_path(workspace)
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self.addCleanup(lambda: child.kill() if child.poll() is None else None)
+        lease = {
+            "owned_by_provider": True,
+            "workspace_root": str(workspace),
+            "pid": child.pid,
+            "instance_id": None,
+            "process_identity": PROVIDER_MODULE.current_process_identity(child.pid),
+        }
+        PROVIDER_MODULE.write_lease(workspace, lease)
+        result = PROVIDER_MODULE.terminate_owned(workspace, lease, 1.0)
+        child.wait(timeout=2.0)
+        self.assertEqual(result["state"], "stopped")
+        self.assertEqual(child.returncode, -PROVIDER_MODULE.signal.SIGTERM)
+        self.assertFalse(PROVIDER_MODULE.socket_path(workspace).exists())
+        self.assertFalse(lease_path.exists())
+
+    def test_prebind_stop_preserves_socket_that_appears_during_cancellation(self) -> None:
+        workspace = self.workspace()
+        socket_path = PROVIDER_MODULE.socket_path(workspace)
+        lease_path = PROVIDER_MODULE.lease_path(workspace)
+        identity = {
+            "pid": 912345,
+            "pid_namespace_inode": 4,
+            "start_ticks": 10,
+            "executable_sha256": "sha256:current",
+        }
+        lease = {"owned_by_provider": True, "workspace_root": str(workspace),
+                 "pid": 912345, "instance_id": None,
+                 "process_identity": identity}
+        lease_path.write_text(json.dumps(lease))
+
+        def bind_while_stopping(pidfd: int, signum: int) -> None:
+            self.assertEqual((pidfd, signum), (68, PROVIDER_MODULE.signal.SIGTERM))
+            socket_path.write_text("path appeared during cancellation")
+
+        with mock.patch.object(PROVIDER_MODULE, "pid_alive", return_value=True), mock.patch.object(
+            PROVIDER_MODULE.os, "pidfd_open", return_value=68,
+        ), mock.patch.object(
+            PROVIDER_MODULE, "current_process_identity", return_value=identity,
+        ), mock.patch.object(PROVIDER_MODULE, "pidfd_exited", return_value=True), mock.patch.object(
+            PROVIDER_MODULE.os, "close",
+        ), mock.patch.object(
+            PROVIDER_MODULE.signal, "pidfd_send_signal", side_effect=bind_while_stopping,
+        ):
+            result = PROVIDER_MODULE.terminate_owned(workspace, lease, 1.0)
+        self.assertEqual(result["state"], "refused")
+        self.assertIn("preserving", result["detail"])
+        self.assertTrue(socket_path.exists())
+        self.assertTrue(lease_path.exists())
+
+    def test_stop_refuses_missing_socket_for_already_bound_instance(self) -> None:
+        workspace = self.workspace()
+        lease_path = PROVIDER_MODULE.lease_path(workspace)
+        lease_path.write_text("lease placeholder")
+        identity = {
+            "pid": 912345,
+            "pid_namespace_inode": 4,
+            "start_ticks": 10,
+            "executable_sha256": "sha256:current",
+        }
+        lease = {"owned_by_provider": True, "workspace_root": str(workspace),
+                 "pid": 912345, "instance_id": "resident-1",
+                 "process_identity": identity}
+        with mock.patch.object(PROVIDER_MODULE, "pid_alive", return_value=True), mock.patch.object(
+            PROVIDER_MODULE.os, "pidfd_open", return_value=67,
+        ), mock.patch.object(
+            PROVIDER_MODULE, "current_process_identity", return_value=identity,
+        ), mock.patch.object(
+            PROVIDER_MODULE, "rpc_call", side_effect=FileNotFoundError(errno.ENOENT, "missing socket"),
+        ), mock.patch.object(
+            PROVIDER_MODULE.os, "close",
+        ), mock.patch.object(PROVIDER_MODULE.signal, "pidfd_send_signal") as send_signal:
+            result = PROVIDER_MODULE.terminate_owned(workspace, lease, 1.0)
+        self.assertEqual(result["state"], "refused")
+        send_signal.assert_not_called()
+        self.assertTrue(lease_path.exists())
 
     def test_stop_reclaims_only_explicitly_refused_stale_socket(self) -> None:
         workspace = self.workspace()

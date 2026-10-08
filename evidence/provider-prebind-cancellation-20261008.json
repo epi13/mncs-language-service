@@ -1,0 +1,65 @@
+{
+  "schema_version": "mncs.language-service.provider-recovery/1",
+  "observed_at": "2026-10-08T20:39:18Z",
+  "provider_checkout_before": {
+    "repository": "mncs-language-service",
+    "revision": "b41eea584f9497a8f95a5412e5f80c9472024d00"
+  },
+  "environment_session": "ses_8fd96a96d65f5caf",
+  "selected_toolchain": "mncs-language:1513bdf62bbcf4d366238dba1d8f2396b2e94128",
+  "reconcile": {
+    "environment_timeout_seconds": 600,
+    "resident_start_timeout_seconds": 600,
+    "result": "TIMEOUT",
+    "resident_probe": "socket-absent"
+  },
+  "provider_owned_child": {
+    "pid": 2877890,
+    "executable": "/home/epi13/Documents/Projects/mncs-language-service/target/debug/mnls-language-service-host",
+    "executable_sha256": "sha256:84c9b4070e1c4c8cf953efa4e07f3f99dce7d073ce3e2cbe57c9ec4f3a2a7f8d",
+    "workspace_root": "/home/epi13/Documents/Projects",
+    "lease_instance_id": null,
+    "observed_elapsed_seconds_at_least": 600,
+    "process_sample": {
+      "state": "R",
+      "cpu_percent": 99.6,
+      "rss_bytes": 46071808,
+      "high_water_rss_bytes": 115851264,
+      "fd_count": 3,
+      "proc_io": {
+        "rchar_bytes": 104910500,
+        "read_bytes": 167936,
+        "write_bytes": 0
+      },
+      "oom_kill_evidence": "UNKNOWN"
+    },
+    "post_stop": {
+      "provider_stop_state": "stopped",
+      "process_present": false,
+      "lease_present": false,
+      "socket_present": false
+    }
+  },
+  "cause": {
+    "established": "Environment and resident provider used equal 600-second deadlines; Environment stopped waiting before the provider cleanup path completed, leaving its detached pre-bind child under a provider-owned lease.",
+    "startup_phase": "LanguageService::configure_root_with_discovery_roots runs before serve_unix binds the socket.",
+    "semantic_subphase": "UNKNOWN",
+    "historical_stack_overflow_log": "The log was last modified on 2026-10-06 and is not evidence of this start failing by stack overflow."
+  },
+  "verification": {
+    "focused_tests": [
+      "test_stop_does_not_signal_pid_with_mismatched_process_identity",
+      "test_stop_cancels_exact_provider_owned_prebind_process_without_socket",
+      "test_stop_cancels_real_provider_owned_prebind_process",
+      "test_prebind_stop_preserves_socket_that_appears_during_cancellation",
+      "test_stop_refuses_missing_socket_for_already_bound_instance"
+    ],
+    "focused_test_result": "SUCCESS",
+    "owner_provider_tests": 28,
+    "owner_provider_test_result": "SUCCESS",
+    "limitations": [
+      "The resident did not reach socket readiness within the declared startup bound.",
+      "No cgroup OOM conclusion was established."
+    ]
+  }
+}

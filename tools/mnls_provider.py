@@ -647,6 +647,7 @@ def terminate_owned(workspace: Path, lease: dict | None, timeout: float) -> dict
     pid = lease.get("pid")
     pid = int(pid) if isinstance(pid, int) and pid > 0 else 0
     live_pid = bool(pid and pid_alive(pid))
+    prebind_cancellation = False
     if live_pid:
         if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
             detail = "this runtime cannot pin the leased process identity safely"
@@ -662,9 +663,29 @@ def terminate_owned(workspace: Path, lease: dict | None, timeout: float) -> dict
             result = _terminate_pinned_owned(workspace, lease, pid, pidfd, timeout)
             if result["state"] != "stopped":
                 return result
+            prebind_cancellation = bool(result.get("prebind_cancellation"))
         finally:
             os.close(pidfd)
-    elif pid:
+    if prebind_cancellation:
+        # The process may have bound just before the pidfd signal landed. Do
+        # not unlink a path that appeared after the missing-socket check; a
+        # later provider probe can distinguish our stale socket from a live
+        # foreign resident and clean it only when safe. Also retain a lease
+        # replaced by a concurrent provider operation.
+        if sock.exists():
+            return {"state": "refused",
+                    "detail": "pre-bind resident stopped, but a socket appeared during cancellation; "
+                              "preserving socket and lease for ownership verification"}
+        if read_lease(workspace) != lease:
+            return {"state": "refused",
+                    "detail": "pre-bind resident stopped, but its provider lease changed; preserving current lease"}
+        try:
+            lease_path(workspace).unlink(missing_ok=True)
+        except OSError as error:
+            return {"state": "refused",
+                    "detail": f"pre-bind resident stopped, but its lease could not be removed: {error}"}
+        return {"state": "stopped", "detail": "provider-owned pre-bind lease stopped"}
+    if not live_pid and pid:
         process_identity = lease.get("process_identity")
         current_namespace = current_pid_namespace_inode()
         if (not isinstance(process_identity, dict)
@@ -722,6 +743,14 @@ def _terminate_pinned_owned(workspace: Path, lease: dict, pid: int,
         detail = "provider lease does not match the current PID namespace, start time, and executable bytes"
         return {"state": "refused", "detail": detail,
                 "recovery": process_identity_recovery(detail, sock)}
+    # ensure records the exact child identity before workspace configuration
+    # and socket bind. If an outer supervisor stops waiting before ensure's
+    # own startup deadline, that provider-owned child can remain in this
+    # pre-bind state. Its exact lease and a missing socket are sufficient to
+    # cancel only that child; there is no resident endpoint to impersonate.
+    if lease.get("instance_id") is None and not sock.exists():
+        result = _signal_pinned_owned(pidfd, sock)
+        return {**result, "prebind_cancellation": result.get("state") == "stopped"}
     # Confirm the live socket belongs to the leased instance before
     # signaling; a foreign host on our path is never killed. A lease
     # without an instance id (interrupted start) is adopted only when
@@ -743,6 +772,10 @@ def _terminate_pinned_owned(workspace: Path, lease: dict, pid: int,
     except (OSError, RuntimeError) as error:
         return {"state": "refused",
                 "detail": f"cannot verify the owned resident before stopping it: {error}"}
+    return _signal_pinned_owned(pidfd, sock)
+
+
+def _signal_pinned_owned(pidfd: int, sock: Path) -> dict:
     try:
         signal.pidfd_send_signal(pidfd, signal.SIGTERM)
     except OSError as error:
