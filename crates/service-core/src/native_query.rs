@@ -375,6 +375,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn status_summary_preserves_first_pass_through_the_resident_kernel() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let library = [
+            manifest_dir.join("../../../mncs-stdlib/library"),
+            manifest_dir.join("../../../../mncs-stdlib/library"),
+            manifest_dir.join("../../../../../mncs-stdlib/library"),
+        ]
+        .into_iter()
+        .find(|path| path.join("core/status.mncs").is_file())
+        .expect("sibling MNCS standard library");
+        std::env::set_var("MNCS_LIBRARY_PATH", &library);
+
+        let cache = RwLock::new(None);
+        let store = DocumentStore::new(None);
+        let summary = execute_status_summary(&cache, &store, &["pass"])
+            .expect("single-PASS resident status query");
+
+        assert_eq!(summary.dominant_status, "pass");
+        assert_eq!(summary.pass_count, 1);
+        assert_eq!(summary.fail_count, 0);
+        assert_eq!(summary.unknown_count, 0);
+        assert_eq!(summary.observed_count, 1);
+        assert!(summary.valid);
+        assert_eq!(summary.backend, RESEARCH_BYTECODE_BACKEND_NAME);
+    }
+
+    #[test]
     fn status_summary_refuses_inputs_over_the_bounded_envelope() {
         let cache = RwLock::new(None);
         let store = DocumentStore::new(None);
