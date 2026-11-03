@@ -116,6 +116,29 @@ class ProviderLifecycleTests(unittest.TestCase):
         finally:
             client.close()
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux directory-fd socket addressing")
+    def test_long_workspace_socket_preserves_identity_and_recovers(self) -> None:
+        parent = self.make_workspace()
+        workspace = parent / ("long-checkout-" * 10)
+        workspace.mkdir()
+        self.workspaces.append(workspace)
+        shutil.copy(FIXTURES / "records.mncs", workspace / "records.mncs")
+        sock = PROVIDER_MODULE.socket_path(workspace)
+        self.assertGreater(len(os.fsencode(sock)), 108)
+        first = run_provider("ensure", "--workspace", str(workspace), env=self.env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        status = run_provider("status", "--workspace", str(workspace), env=self.env)
+        self.assertTrue(stdout_json(status)["ready"], status.stdout)
+        self.assertTrue(sock.exists())
+        query = run_provider("query", "--workspace", str(workspace),
+                             "--method", "workspace_status", env=self.env)
+        self.assertEqual(query.returncode, 0, query.stdout + query.stderr)
+        stopped = run_provider("stop", "--workspace", str(workspace), env=self.env)
+        self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+        self.assertFalse(sock.exists())
+        again = run_provider("stop", "--workspace", str(workspace), env=self.env)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+
     def test_status_reports_absent_for_a_quiet_workspace(self) -> None:
         workspace = self.make_workspace("records.mncs")
         completed = run_provider("status", "--workspace", str(workspace), env=self.env)

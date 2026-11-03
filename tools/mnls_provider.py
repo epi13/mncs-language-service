@@ -21,6 +21,7 @@ failed or timed out; 5 host binary unavailable; 6 resident RPC error.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import hashlib
 import json
@@ -444,12 +445,26 @@ def language_toolchain() -> dict:
     }
 
 
+@contextlib.contextmanager
+def unix_socket_address(path: Path):
+    """Address the same workspace socket without AF_UNIX's pathname limit."""
+    if sys.platform.startswith("linux") and len(os.fsencode(path)) >= 104:
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            yield f"/proc/self/fd/{directory}/{path.name}"
+        finally:
+            os.close(directory)
+    else:
+        yield str(path)
+
+
 def rpc_call_raw(sock: Path, method: str, params: dict, timeout: float):
     request = json.dumps({"id": 1, "method": method, "params": params}) + "\n"
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(timeout)
     try:
-        client.connect(str(sock))
+        with unix_socket_address(sock) as address:
+            client.connect(address)
         client.sendall(request.encode("utf-8"))
         chunks: list[bytes] = []
         total = 0

@@ -693,10 +693,40 @@ impl CallFailure {
     }
 }
 
+// Keep the canonical workspace/socket identity. Only the syscall address
+// uses a live directory descriptor when Linux's sockaddr_un cannot hold it.
+fn unix_socket_address(
+    path: &Path,
+) -> std::io::Result<(std::path::PathBuf, Option<std::fs::File>)> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        if path.as_os_str().as_bytes().len() >= 104 {
+            let parent = path
+                .parent()
+                .ok_or_else(|| std::io::Error::other("socket has no parent"))?;
+            let name = path
+                .file_name()
+                .ok_or_else(|| std::io::Error::other("socket has no name"))?;
+            let directory = std::fs::File::open(parent)?;
+            let address =
+                std::path::PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+                    .join(name);
+            return Ok((address, Some(directory)));
+        }
+    }
+    Ok((path.to_path_buf(), None))
+}
+
 fn connect(
     socket: &Path,
 ) -> Result<std::io::BufReader<std::os::unix::net::UnixStream>, ServiceError> {
-    let stream = std::os::unix::net::UnixStream::connect(socket).map_err(|error| {
+    let (address, _directory) =
+        unix_socket_address(socket).map_err(|error| ServiceError::WorkspaceUnavailable {
+            path: format!("{}: {error}", socket.display()),
+        })?;
+    let stream = std::os::unix::net::UnixStream::connect(address).map_err(|error| {
         ServiceError::WorkspaceUnavailable {
             path: format!("{}: {error}", socket.display()),
         }
@@ -1367,7 +1397,8 @@ pub fn serve_unix(path: impl AsRef<Path>, service: Arc<LanguageService>) -> std:
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let listener = std::os::unix::net::UnixListener::bind(path)?;
+    let (address, _directory) = unix_socket_address(path)?;
+    let listener = std::os::unix::net::UnixListener::bind(address)?;
     eprintln!(
         "mnls-language-service-host: resident service listening at {}",
         path.display()
@@ -1727,5 +1758,34 @@ fn dispatch(service: &LanguageService, method: &str, params: Value) -> Result<Va
         other => Err(ServiceError::Unsupported {
             reason: format!("unknown resident method {other}"),
         }),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod long_socket_path_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_long_path_supports_bind_and_remote_connect() {
+        let root = std::env::temp_dir().join(format!(
+            "mnls-long-socket-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let directory = root.join("registered-isolated-checkout-".repeat(5));
+        std::fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("mnls-language-service.sock");
+        assert!(socket.as_os_str().len() > 108);
+        let (address, guard) = unix_socket_address(&socket).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(address).unwrap();
+        drop(guard);
+        assert!(socket.exists());
+        let remote = connect(&socket).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        drop((remote, accepted, listener));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
