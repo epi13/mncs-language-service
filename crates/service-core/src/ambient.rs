@@ -5,20 +5,20 @@
 //!
 //! - resident status projects process/workspace/toolchain bindings;
 //! - the semantic capsule projects measured findings into a fixed envelope;
-//! - every admission decision inside the capsule is executed by the frozen
-//!   MNCS policy in `mncs/semantic_capsule.mncs` through the authoritative
-//!   compiler and research-bytecode backend.
+//! - severity/kind ordering and every admission decision execute in the
+//!   MNCS kernel in `mncs/semantic_capsule.mncs`, using the shared Stdlib
+//!   sort capability and the research-bytecode backend.
 //!
-//! The host applies the policy's admission flags mechanically and must not
-//! widen them. There is intentionally no Rust control reimplementation of
-//! the admission policy; correctness is established by executed-behavior
-//! tests against the real kernel, not by a duplicated decision procedure.
+//! The host retains identity-string ordering at the data boundary, then
+//! applies native source indices and admission flags mechanically. There is
+//! intentionally no Rust control reimplementation of the numeric priority
+//! or admission policy; correctness is established by real-kernel behavior.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use mncs_codegen::{execute_backend, RESEARCH_BYTECODE_BACKEND_NAME};
-use mncs_compiler::{ReferenceCompiler, SourceFrontEndResult};
+use mncs_compiler::{ModuleResolver, ReferenceCompiler, SourceFrontEndResult};
 use mncs_model::{
     ArtifactRepresentation, CompilationStatus, ExecutionRequest, ExecutionStatus, ExecutionTarget,
     ExecutionValue, IntegerType, Program, TransformationStatus, EXECUTION_REQUEST_SCHEMA_VERSION,
@@ -36,8 +36,10 @@ pub const SEMANTIC_CAPSULE_SCHEMA_VERSION: &str = "mncs.language-service.semanti
 pub const SEMANTIC_IMPACT_SCHEMA_VERSION: &str = "mncs.language-service.semantic-impact/1";
 
 /// Fixed policy envelope: at most this many measured findings are projected
-/// into one capsule evaluation. The bound is shared with the MNCS module.
+/// into one capsule admission evaluation.
 pub const CAPSULE_ENVELOPE_CAPACITY: usize = 32;
+/// Native ordering compares the retained envelope with one incoming batch.
+pub const CAPSULE_ORDER_WINDOW_CAPACITY: usize = CAPSULE_ENVELOPE_CAPACITY * 2;
 
 /// Ambient-relevant feature flags for one service build. These name stable
 /// query families, not every RPC method.
@@ -52,6 +54,7 @@ pub const AMBIENT_FEATURES: &[&str] = &[
 
 pub(crate) const CAPSULE_MODULE: &str = "mncs.language_service.semantic_capsule.v1";
 pub(crate) const CAPSULE_FUNCTION: &str = "select_capsule";
+pub(crate) const CAPSULE_ORDER_FUNCTION: &str = "order_capsule_window";
 const CAPSULE_URI: &str = "mncs://language-service/semantic-capsule.mncs";
 const CAPSULE_SOURCE: &str = include_str!("../../../mncs/semantic_capsule.mncs");
 const CAPSULE_STEP_BUDGET: u64 = 100_000;
@@ -276,7 +279,7 @@ pub struct MeasuredTotals {
     /// not trigger workspace compilation to fill this gap.
     pub analysis_pending_documents: usize,
     /// Candidates dropped before policy evaluation because the fixed
-    /// envelope was full. Deterministic priority order keeps this stable.
+    /// envelope was full. Native priority ordering keeps this stable.
     pub truncated_by_envelope: usize,
 }
 
@@ -328,6 +331,7 @@ pub struct SemanticCapsuleResponse {
 #[derive(Debug, Clone)]
 pub(crate) struct CapsuleKernel {
     source_identity: String,
+    cache_identity: String,
     program: Arc<Program>,
     artifact: Arc<mncs_model::BackendArtifact>,
 }
@@ -347,6 +351,12 @@ pub(crate) struct CapsuleSelection {
     pub backend: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapsuleOrdering {
+    /// Source indices in native priority order, limited to the active window.
+    pub indices: Vec<usize>,
+}
+
 fn frontend_error(front_end: &SourceFrontEndResult) -> String {
     let details = front_end
         .diagnostics
@@ -363,6 +373,44 @@ fn frontend_error(front_end: &SourceFrontEndResult) -> String {
     }
 }
 
+fn capsule_dependency_identities(
+    store: &DocumentStore,
+) -> Result<BTreeMap<String, String>, String> {
+    let resolver = StoreResolver::new(store);
+    let mut pending = vec![CAPSULE_SOURCE.to_owned()];
+    let mut dependencies = BTreeMap::new();
+    while let Some(source) = pending.pop() {
+        for module in crate::modules::use_names(&source) {
+            if dependencies.contains_key(module) {
+                continue;
+            }
+            let envelope = resolver
+                .resolve(module)
+                .ok_or_else(|| format!("capsule dependency {module:?} is unavailable"))?;
+            dependencies.insert(module.to_owned(), envelope.identity);
+            pending.push(envelope.text);
+        }
+    }
+    Ok(dependencies)
+}
+
+fn capsule_cache_identity(
+    source_identity: &str,
+    dependencies: &BTreeMap<String, String>,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mncs-language-service.semantic-capsule-kernel/2\0");
+    digest.update(source_identity.as_bytes());
+    digest.update([0]);
+    for (module, identity) in dependencies {
+        digest.update(module.as_bytes());
+        digest.update([0]);
+        digest.update(identity.as_bytes());
+        digest.update([0]);
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
 fn prepare_kernel(store: &DocumentStore, source_identity: &str) -> Result<CapsuleKernel, String> {
     let resolver = StoreResolver::new(store);
     let envelope = store.envelope(CAPSULE_URI, CAPSULE_SOURCE);
@@ -377,6 +425,17 @@ fn prepare_kernel(store: &DocumentStore, source_identity: &str) -> Result<Capsul
             .clone()
             .ok_or_else(|| frontend_error(&front_end))?,
     );
+    let dependencies = front_end
+        .module_resolutions
+        .iter()
+        .map(|dependency| {
+            (
+                dependency.requested_module.clone(),
+                dependency.source_identity.clone(),
+            )
+        })
+        .collect();
+    let cache_identity = capsule_cache_identity(source_identity, &dependencies);
     let request = compiler
         .request_for_program_with_backend(
             &program,
@@ -415,6 +474,7 @@ fn prepare_kernel(store: &DocumentStore, source_identity: &str) -> Result<Capsul
     }
     Ok(CapsuleKernel {
         source_identity: source_identity.to_owned(),
+        cache_identity,
         program,
         artifact: Arc::new(artifact),
     })
@@ -425,9 +485,11 @@ fn kernel(
     store: &DocumentStore,
 ) -> Result<Arc<CapsuleKernel>, String> {
     let envelope = store.envelope(CAPSULE_URI, CAPSULE_SOURCE);
+    let dependencies = capsule_dependency_identities(store)?;
+    let cache_identity = capsule_cache_identity(&envelope.identity, &dependencies);
     if let Ok(read) = cache.read() {
         if let Some(existing) = read.as_ref() {
-            if existing.source_identity == envelope.identity {
+            if existing.cache_identity == cache_identity {
                 return Ok(Arc::clone(existing));
             }
         }
@@ -437,7 +499,7 @@ fn kernel(
         .write()
         .map_err(|_| "capsule policy kernel cache is poisoned".to_owned())?;
     if let Some(existing) = write.as_ref() {
-        if existing.source_identity == prepared.source_identity {
+        if existing.cache_identity == prepared.cache_identity {
             return Ok(Arc::clone(existing));
         }
     }
@@ -523,15 +585,23 @@ fn bool_sequence_field(value: &ExecutionValue, field: &str) -> Result<Vec<bool>,
 }
 
 fn integer_sequence_field(value: &ExecutionValue, field: &str) -> Result<Vec<i64>, String> {
+    integer_sequence_field_with_len(value, field, CAPSULE_ENVELOPE_CAPACITY)
+}
+
+fn integer_sequence_field_with_len(
+    value: &ExecutionValue,
+    field: &str,
+    expected_len: usize,
+) -> Result<Vec<i64>, String> {
     let ExecutionValue::Sequence { values } = value else {
         return Err(format!(
             "capsule selection field {field:?} is not a sequence"
         ));
     };
-    if values.len() != CAPSULE_ENVELOPE_CAPACITY {
+    if values.len() != expected_len {
         return Err(format!(
-            "capsule selection field {field:?} has length {} instead of {CAPSULE_ENVELOPE_CAPACITY}",
-            values.len()
+            "capsule selection field {field:?} has length {} instead of {expected_len}",
+            values.len(),
         ));
     }
     values
@@ -540,12 +610,135 @@ fn integer_sequence_field(value: &ExecutionValue, field: &str) -> Result<Vec<i64
         .collect()
 }
 
+/// Execute native severity/kind ordering over one identity-ordered window.
+/// String keys remain in the host boundary; all numeric priority decisions
+/// are made by the MNCS kernel using `mncs.std.sort.v1`.
+pub(crate) fn execute_capsule_order(
+    cache: &RwLock<Option<Arc<CapsuleKernel>>>,
+    store: &DocumentStore,
+    findings: &[(i64, i64)],
+    count: usize,
+) -> Result<CapsuleOrdering, String> {
+    if findings.len() > CAPSULE_ORDER_WINDOW_CAPACITY || count > CAPSULE_ORDER_WINDOW_CAPACITY {
+        return Err(format!(
+            "capsule ordering window is bounded to {CAPSULE_ORDER_WINDOW_CAPACITY} findings"
+        ));
+    }
+    if count != findings.len() {
+        return Err("capsule ordering count does not match its findings".to_owned());
+    }
+    let kernel = kernel(cache, store)?;
+    let mut values = findings
+        .iter()
+        .map(|(severity, kind)| {
+            record_argument(
+                &kernel.program,
+                "CapsuleFinding",
+                vec![
+                    ("severity".to_owned(), integer_argument(*severity)),
+                    ("kind".to_owned(), integer_argument(*kind)),
+                ],
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    while values.len() < CAPSULE_ORDER_WINDOW_CAPACITY {
+        values.push(record_argument(
+            &kernel.program,
+            "CapsuleFinding",
+            vec![
+                ("severity".to_owned(), integer_argument(0)),
+                ("kind".to_owned(), integer_argument(0)),
+            ],
+        )?);
+    }
+    let request = ExecutionRequest {
+        schema_version: EXECUTION_REQUEST_SCHEMA_VERSION.to_owned(),
+        target: ExecutionTarget {
+            module: CAPSULE_MODULE.to_owned(),
+            function: CAPSULE_ORDER_FUNCTION.to_owned(),
+        },
+        arguments: vec![
+            ExecutionValue::Sequence {
+                values: Arc::new(values),
+            },
+            ExecutionValue::Byte {
+                value: count as i128,
+            },
+        ],
+        type_arguments: Vec::new(),
+        step_budget: CAPSULE_STEP_BUDGET,
+        policy: Default::default(),
+        host_grants: Vec::new(),
+        call_depth_budget: None,
+    };
+    let execution = execute_backend(&kernel.artifact, &request);
+    if execution.status != ExecutionStatus::Returned || execution.returned.len() != 1 {
+        let reason = execution
+            .failure
+            .map(|failure| failure.reason)
+            .unwrap_or_else(|| format!("execution status was {:?}", execution.status));
+        return Err(format!("capsule ordering execution refused: {reason}"));
+    }
+    let ExecutionValue::Record {
+        type_identity,
+        fields,
+        ..
+    } = &execution.returned[0]
+    else {
+        return Err("capsule ordering returned a non-record value".to_owned());
+    };
+    let record = kernel
+        .program
+        .record_types
+        .iter()
+        .find(|record| &record.identity == type_identity && record.name == "CapsuleOrder")
+        .ok_or_else(|| "capsule ordering returned an unknown record".to_owned())?;
+    if record.fields.len() != fields.len()
+        || record
+            .fields
+            .iter()
+            .zip(fields.iter())
+            .any(|(expected, actual)| expected.name != actual.0)
+    {
+        return Err("capsule ordering returned an unexpected record shape".to_owned());
+    }
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(field_name, _)| field_name == name)
+            .map(|(_, value)| value)
+            .ok_or_else(|| format!("capsule ordering omitted field {name:?}"))
+    };
+    let indices = integer_sequence_field_with_len(
+        field("indices")?,
+        "indices",
+        CAPSULE_ORDER_WINDOW_CAPACITY,
+    )?;
+    if !bool_field(field("valid")?, "valid")? {
+        return Err("capsule ordering rejected invalid finding ranks".to_owned());
+    }
+    let mut seen = vec![false; count];
+    let mut ordered = Vec::with_capacity(count);
+    for source in indices.into_iter().take(count) {
+        let index = usize::try_from(source)
+            .map_err(|_| "capsule ordering returned a negative source index".to_owned())?;
+        if index >= count || seen[index] {
+            return Err("capsule ordering returned an invalid index permutation".to_owned());
+        }
+        seen[index] = true;
+        ordered.push(index);
+    }
+    if ordered.len() != count || seen.iter().any(|present| !present) {
+        return Err("capsule ordering returned an incomplete index permutation".to_owned());
+    }
+    Ok(CapsuleOrdering { indices: ordered })
+}
+
 /// Execute the frozen capsule admission policy over one measured envelope.
 ///
-/// `findings` are `(severity_rank, kind_rank)` pairs in deterministic
-/// priority order; unused slots are padded with rank-zero findings and
-/// excluded by `count`. Budgets live inside the MNCS module; the host
-/// supplies only measured ranks and the active count.
+/// `findings` are `(severity_rank, kind_rank)` pairs already ordered by the
+/// native kernel; unused slots are padded with rank-zero findings and
+/// excluded by `count`. Budgets live inside the MNCS module.
 pub(crate) fn execute_capsule_selection(
     cache: &RwLock<Option<Arc<CapsuleKernel>>>,
     store: &DocumentStore,
@@ -832,7 +1025,7 @@ impl crate::queries::LanguageService {
         // is used by bounded ambient consumers; turning a cursor recovery
         // call into analysis of every selected workspace document can outlive
         // the caller's deadline while retaining a runaway compiler job.
-        let mut diagnostic_rows: Vec<(i64, String, MeasuredFinding)> = Vec::new();
+        let mut diagnostic_rows: Vec<MeasuredFinding> = Vec::new();
         for uri in self.store.document_uris() {
             let Some(snapshot) = self.cached_snapshot_if_current(&uri) else {
                 measured.analysis_pending_documents += 1;
@@ -842,19 +1035,15 @@ impl crate::queries::LanguageService {
                 let rank = severity_rank(&item.severity);
                 measured.diagnostics += 1;
                 let key = format!("{}|{}|{}", item.code, uri, item.message);
-                diagnostic_rows.push((
-                    rank,
-                    key.clone(),
-                    MeasuredFinding {
-                        severity_rank: rank,
-                        kind_rank: 0,
-                        key,
-                        summary: format!("{} {}: {}", item.severity, item.code, item.message),
-                        uri: Some(uri.clone()),
-                        identity: None,
-                        code: Some(item.code.clone()),
-                    },
-                ));
+                diagnostic_rows.push(MeasuredFinding {
+                    severity_rank: rank,
+                    kind_rank: 0,
+                    key,
+                    summary: format!("{} {}: {}", item.severity, item.code, item.message),
+                    uri: Some(uri.clone()),
+                    identity: None,
+                    code: Some(item.code.clone()),
+                });
             }
         }
 
@@ -975,22 +1164,57 @@ impl crate::queries::LanguageService {
             });
         }
 
-        // Deterministic priority order shared with the policy envelope:
-        // severity rank, then kind rank, then identity key.
-        let mut envelope: Vec<MeasuredFinding> = Vec::new();
-        envelope.extend(diagnostic_rows.into_iter().map(|(_, _, finding)| finding));
-        envelope.extend(subject_rows.into_values());
-        envelope.extend(obligation_rows);
-        envelope.extend(module_rows.into_values());
-        envelope.sort_by(|left, right| {
-            right
-                .severity_rank
-                .cmp(&left.severity_rank)
-                .then(left.kind_rank.cmp(&right.kind_rank))
-                .then(left.key.cmp(&right.key))
-        });
-        if envelope.len() > CAPSULE_ENVELOPE_CAPACITY {
-            measured.truncated_by_envelope = envelope.len() - CAPSULE_ENVELOPE_CAPACITY;
+        // Identity strings remain at the host boundary. The native ordering
+        // kernel owns severity/kind priority and returns source indices; in
+        // batches, the retained top envelope is merged with each new window.
+        let mut candidates = Vec::<MeasuredFinding>::new();
+        candidates.extend(diagnostic_rows);
+        candidates.extend(subject_rows.into_values());
+        candidates.extend(obligation_rows);
+        candidates.extend(module_rows.into_values());
+        let candidate_count = candidates.len();
+        let mut envelope = Vec::<MeasuredFinding>::with_capacity(CAPSULE_ENVELOPE_CAPACITY);
+        for incoming in candidates.chunks(CAPSULE_ENVELOPE_CAPACITY) {
+            envelope.extend(incoming.iter().cloned());
+            envelope.sort_by(|left, right| left.key.cmp(&right.key));
+            let ranks: Vec<(i64, i64)> = envelope
+                .iter()
+                .map(|finding| (finding.severity_rank, finding.kind_rank))
+                .collect();
+            let ordering =
+                match execute_capsule_order(&self.capsule_kernel, &self.store, &ranks, ranks.len())
+                {
+                    Ok(ordering) => ordering,
+                    Err(reason) => {
+                        return Ok(SemanticCapsuleResponse {
+                            schema_version: SEMANTIC_CAPSULE_SCHEMA_VERSION.to_owned(),
+                            status: ResponseStatus::Unsupported {
+                                reason: format!("capsule ordering unavailable: {reason}"),
+                            },
+                            workspace_root: self.store.workspace_root_path(),
+                            generation: self.store.generation(),
+                            stream_identity: live_stream,
+                            after_cursor: known_cursor,
+                            current_cursor,
+                            window_matched,
+                            measured,
+                            policy: None,
+                            findings: Vec::new(),
+                            unresolved: vec![reason],
+                            limitations,
+                            snapshot: None,
+                        });
+                    }
+                };
+            envelope = ordering
+                .indices
+                .into_iter()
+                .take(CAPSULE_ENVELOPE_CAPACITY)
+                .map(|index| envelope[index].clone())
+                .collect();
+        }
+        if candidate_count > CAPSULE_ENVELOPE_CAPACITY {
+            measured.truncated_by_envelope = candidate_count - CAPSULE_ENVELOPE_CAPACITY;
             envelope.truncate(CAPSULE_ENVELOPE_CAPACITY);
             limitations.push(format!(
                 "{} measured findings exceed the fixed policy envelope and are counted, not admitted",
@@ -1262,6 +1486,57 @@ mod tests {
         let store = DocumentStore::new(None);
         execute_capsule_selection(&cache, &store, findings, findings.len())
             .expect("capsule policy executes")
+    }
+
+    fn kernel_order(findings: &[(i64, i64)]) -> Vec<usize> {
+        let cache = RwLock::new(None);
+        let store = DocumentStore::new(None);
+        execute_capsule_order(&cache, &store, findings, findings.len())
+            .expect("capsule ordering executes")
+            .indices
+    }
+
+    #[test]
+    fn capsule_kernel_cache_identity_tracks_imported_sources() {
+        let source_identity = "mncs:source:artifact:capsule";
+        let dependencies = BTreeMap::from([(
+            "mncs.std.sort.v1".to_owned(),
+            "mncs:source:artifact:sort-before".to_owned(),
+        )]);
+        let original = capsule_cache_identity(source_identity, &dependencies);
+        let changed = capsule_cache_identity(
+            source_identity,
+            &BTreeMap::from([(
+                "mncs.std.sort.v1".to_owned(),
+                "mncs:source:artifact:sort-after".to_owned(),
+            )]),
+        );
+        assert_eq!(
+            original,
+            capsule_cache_identity(source_identity, &dependencies)
+        );
+        assert_ne!(original, changed, "import changes invalidate the kernel");
+    }
+
+    #[test]
+    fn native_sort_orders_severity_then_kind_and_preserves_identity_ties() {
+        // Input position represents the host's key-ordered string boundary.
+        // Independent expected indices exercise the numeric priority policy.
+        let findings = [(0, 3), (2, 2), (2, 0), (1, 1), (1, 0), (0, 0)];
+        assert_eq!(kernel_order(&findings), vec![2, 1, 4, 3, 5, 0]);
+        assert_eq!(kernel_order(&[(2, 0), (2, 0)]), vec![0, 1]);
+    }
+
+    #[test]
+    fn native_sort_handles_the_full_two_batch_window() {
+        let mut findings = vec![(0, 3); CAPSULE_ORDER_WINDOW_CAPACITY];
+        findings[32] = (1, 0);
+        findings[63] = (2, 0);
+        let order = kernel_order(&findings);
+        assert_eq!(order.len(), CAPSULE_ORDER_WINDOW_CAPACITY);
+        assert_eq!(&order[..2], &[63, 32]);
+        assert_eq!(order[2], 0);
+        assert_eq!(order[63], 62);
     }
 
     #[test]

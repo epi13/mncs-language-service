@@ -191,24 +191,82 @@ fn capsule_is_bounded_admitted_by_policy_and_expandable() {
         error.uri.as_deref()
     );
 
-    // Findings arrive in deterministic priority order.
-    let ranks: Vec<(String, String)> = capsule
+    // Findings arrive in native severity/kind priority order.
+    let ranks: Vec<(u8, u8)> = capsule
         .findings
         .iter()
-        .map(|finding| (finding.relevance.clone(), finding.kind.clone()))
+        .map(|finding| {
+            let severity = match finding.severity.as_str() {
+                "error" => 0,
+                "warning" => 1,
+                _ => 2,
+            };
+            let kind = match finding.kind.as_str() {
+                "diagnostic" => 0,
+                "changed_subject" => 1,
+                "obligation" => 2,
+                _ => 3,
+            };
+            (severity, kind)
+        })
         .collect();
     let mut sorted = ranks.clone();
-    sorted.sort_by(|left, right| {
-        let relevance_rank = |relevance: &str| match relevance {
-            "actionable" => 0,
-            "watch" => 1,
-            _ => 2,
-        };
-        relevance_rank(&left.0)
-            .cmp(&relevance_rank(&right.0))
-            .then(left.1.cmp(&right.1))
-    });
+    sorted.sort();
     assert_eq!(ranks, sorted, "capsule order is deterministic");
+}
+
+#[test]
+fn capsule_keeps_native_top_priority_across_multiple_windows() {
+    let root = temp_workspace("capsule-overflow");
+    let names: Vec<String> = (0..40)
+        .map(|index| format!("fault-{index:02}.mncs"))
+        .collect();
+    for name in &names {
+        fs::copy(fixtures_dir().join("syntax-error.mncs"), root.join(name))
+            .expect("copy syntax error fixture");
+    }
+    let service = LanguageService::new(None);
+    service.configure_root(Some(root.clone())).expect("root");
+    for name in &names {
+        service
+            .snapshot(&workspace_uri(&root, name))
+            .expect("analyze syntax error");
+    }
+
+    let capsule = service.semantic_capsule(None, 0).expect("overflow capsule");
+    assert_eq!(capsule.status, ResponseStatus::Answered, "{capsule:#?}");
+    let candidate_count = capsule.measured.diagnostics
+        + capsule.measured.changed_subjects
+        + capsule.measured.obligations
+        + capsule.measured.affected_modules;
+    assert!(candidate_count > CAPSULE_ENVELOPE_CAPACITY);
+    assert_eq!(
+        capsule.measured.truncated_by_envelope,
+        candidate_count - CAPSULE_ENVELOPE_CAPACITY
+    );
+    assert!(capsule.findings.len() <= CAPSULE_ENVELOPE_CAPACITY);
+
+    let priorities: Vec<(u8, u8)> = capsule
+        .findings
+        .iter()
+        .map(|finding| {
+            let severity = match finding.severity.as_str() {
+                "error" => 0,
+                "warning" => 1,
+                _ => 2,
+            };
+            let kind = match finding.kind.as_str() {
+                "diagnostic" => 0,
+                "changed_subject" => 1,
+                "obligation" => 2,
+                _ => 3,
+            };
+            (severity, kind)
+        })
+        .collect();
+    let mut sorted = priorities.clone();
+    sorted.sort();
+    assert_eq!(priorities, sorted, "admitted findings retain native order");
 }
 
 #[test]
