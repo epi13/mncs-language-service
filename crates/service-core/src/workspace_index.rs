@@ -285,16 +285,13 @@ impl WorkspaceEntry {
         now.modules == self.dep_fingerprints
     }
 
-    /// Case-insensitive substring match over this entry's symbols.
-    pub fn symbols_matching(&self, needle: &str) -> Vec<usize> {
-        if needle.is_empty() {
-            return (0..self.symbols.len()).collect();
-        }
-        self.lower_names
+    /// Pair each authoritative summary with its precomputed lowercase name
+    /// for bounded query projection. The query layer may pass the bytes to
+    /// an MNCS kernel while this index retains ownership of normalization.
+    pub(crate) fn symbols_with_lower_names(&self) -> impl Iterator<Item = (&SymbolSummary, &str)> {
+        self.symbols
             .iter()
-            .enumerate()
-            .filter_map(|(index, name)| name.contains(needle).then_some(index))
-            .collect()
+            .zip(self.lower_names.iter().map(String::as_str))
     }
 }
 

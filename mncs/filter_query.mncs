@@ -1,13 +1,46 @@
-mncs 0.10;
+mncs 0.13;
 
-// The service owns this adapter signature; the counting semantics remain
-// authoritative in mncs.core.sequences.v1. The Rust service projects symbol
-// kinds to integer tags (see native_filter.rs for the stable mapping) and
-// pads unused slots with -1, which is never a valid tag.
+// The service owns these bounded adapter signatures; generic sequence and
+// text operations remain authoritative in their Standard modules.
 module mncs.language_service.filter_query.v1;
 
 use mncs.core.sequences.v1;
+use mncs.std.text_scan.v1 as text_scan;
+
+record SymbolMatchResult {
+    matched: [bool; 64],
+    matched_count: i64,
+    valid: bool
+}
 
 fn count_matching(tags: [i64; 8], wanted: i64) -> (matches: i64) {
     return count<8>(tags, wanted);
+}
+
+fn match_names(
+    names: [[byte; up_to 64]; up_to 64],
+    needle: [byte; 64],
+    needle_length: byte
+) -> (result: SymbolMatchResult) {
+    if needle_length > 64 {
+        return SymbolMatchResult {
+            matched: [false; 64],
+            matched_count: 0,
+            valid: false
+        };
+    }
+    let length: u64 = needle_length as u64;
+    let initial: [bool; 64] = [false; 64];
+    iterate i over names carrying matched: [bool; 64] = initial {
+        next matched = replace(
+            matched,
+            i,
+            text_scan.contains<64>(names[i], names[i].len, needle, length)
+        );
+    }
+    return SymbolMatchResult {
+        matched: matched,
+        matched_count: count_true<64>(matched),
+        valid: true
+    };
 }

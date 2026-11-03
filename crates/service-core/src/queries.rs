@@ -2105,15 +2105,83 @@ impl LanguageService {
         let needle = query.to_lowercase();
         let _ = self.ensure_workspace_entries();
         let mut hits = Vec::new();
+        let mut bounded_candidates = Vec::new();
         if let Ok(index) = self.workspace_index.read() {
             for (uri, entry) in index.entries() {
-                for symbol in entry.symbols_matching(&needle) {
-                    hits.push(WorkspaceSymbolHit {
+                for (symbol, lower_name) in entry.symbols_with_lower_names() {
+                    let candidate = WorkspaceSymbolHit {
                         uri: (*uri).clone(),
-                        summary: entry.symbols[symbol].clone(),
-                    });
+                        summary: symbol.clone(),
+                    };
+                    if needle.is_empty() {
+                        hits.push(candidate);
+                    } else if lower_name.len() > crate::native_filter::MAX_SYMBOL_NAME_BYTES
+                        || needle.len() > crate::native_filter::MAX_SYMBOL_NAME_BYTES
+                    {
+                        // MNCS receives only names and needles that fit its
+                        // explicit byte-view contract. Keep the old Rust
+                        // substring behavior for oversized Unicode names.
+                        if lower_name.contains(&needle) {
+                            hits.push(candidate);
+                        }
+                    } else {
+                        bounded_candidates.push((candidate, lower_name.to_owned()));
+                    }
                 }
             }
+        }
+        let mut batch: Vec<(WorkspaceSymbolHit, String)> = Vec::new();
+        let mut batch_scan_work = 0usize;
+        let process_batch = |batch: &[(WorkspaceSymbolHit, String)],
+                             hits: &mut Vec<WorkspaceSymbolHit>| {
+            let names = batch
+                .iter()
+                .map(|(_, lower_name)| lower_name.as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            match crate::native_filter::execute_symbol_matches(
+                &self.filter_kernel,
+                &self.store,
+                &names,
+                needle.as_bytes(),
+            ) {
+                Ok(native) => {
+                    for ((candidate, _), matched) in batch.iter().zip(native.matched.iter()) {
+                        if *matched {
+                            hits.push(candidate.clone());
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Services without the optional Standard library or the
+                    // native backend retain the previous query behavior.
+                    for (candidate, lower_name) in batch {
+                        if lower_name.contains(&needle) {
+                            hits.push(candidate.clone());
+                        }
+                    }
+                }
+            }
+        };
+        for candidate in bounded_candidates {
+            let candidate_work = candidate
+                .1
+                .len()
+                .saturating_add(1)
+                .saturating_mul(crate::native_filter::MAX_SYMBOL_NAME_BYTES);
+            if !batch.is_empty()
+                && (batch.len() == crate::native_filter::MAX_SYMBOL_MATCH_NAMES
+                    || batch_scan_work.saturating_add(candidate_work)
+                        > crate::native_filter::MAX_SYMBOL_SCAN_WORK_PER_CALL)
+            {
+                process_batch(&batch, &mut hits);
+                batch.clear();
+                batch_scan_work = 0;
+            }
+            batch_scan_work = batch_scan_work.saturating_add(candidate_work);
+            batch.push(candidate);
+        }
+        if !batch.is_empty() {
+            process_batch(&batch, &mut hits);
         }
         hits.sort_by(|left, right| {
             left.summary

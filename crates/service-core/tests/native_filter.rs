@@ -16,6 +16,16 @@ fn stdlib_library() -> PathBuf {
     if sibling.join("stdlib-manifest.json").is_file() {
         return sibling.join("library");
     }
+    let worktree_sibling =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../mncs-stdlib");
+    if worktree_sibling.join("stdlib-manifest.json").is_file() {
+        return worktree_sibling.join("library");
+    }
+    let worktree_root_sibling =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../../mncs-stdlib");
+    if worktree_root_sibling.join("stdlib-manifest.json").is_file() {
+        return worktree_root_sibling.join("library");
+    }
     let root = std::env::var_os("MNCS_LANGUAGE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -93,4 +103,30 @@ fn native_kind_count_is_stable_across_repeated_calls() {
             .map(|summary| summary.kernel_artifact_identity),
         "the frozen kernel artifact must be reused"
     );
+}
+
+#[test]
+fn workspace_symbol_query_uses_native_substring_matching() {
+    if !with_library() {
+        return;
+    }
+    let svc = LanguageService::new(None);
+    let uri = "untitled:native-workspace-symbol-match";
+    let source = "mncs 0.5;\n\nmodule probe.workspace_symbol_match;\n\nfn remoteThing() -> (result: i64) { return 1; }\nfn Motor() -> (result: i64) { return 2; }\nfn unrelated() -> (result: i64) { return 3; }\n";
+    svc.did_open(uri, 1, source.to_owned()).expect("open");
+    assert!(svc.snapshot(uri).expect("snapshot").valid());
+
+    // The query is upper-case and appears inside `remoteThing`, so this
+    // checks normalization plus substring behavior through the real service
+    // consumer (the MCP adapter delegates to this same method).
+    let response = svc.workspace_symbols("MOT");
+    let names = response
+        .symbols
+        .iter()
+        .map(|hit| hit.summary.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["Motor", "remoteThing"]);
+
+    let all_symbols = svc.workspace_symbols("");
+    assert!(all_symbols.symbols.len() >= 4);
 }

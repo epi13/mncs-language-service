@@ -22,15 +22,20 @@ fn language_library() -> PathBuf {
     if let Some(root) = std::env::var_os("MNCS_STDLIB_ROOT").map(PathBuf::from) {
         return root.join("library");
     }
-    let sibling = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-stdlib");
-    if sibling.join("stdlib-manifest.json").is_file() {
-        return sibling.join("library");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "../../../mncs-stdlib",
+        "../../../../mncs-stdlib",
+        "../../../../../mncs-stdlib",
+    ] {
+        let sibling = manifest_dir.join(relative);
+        if sibling.join("stdlib-manifest.json").is_file() {
+            return sibling.join("library");
+        }
     }
     let root = std::env::var_os("MNCS_LANGUAGE_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-language")
-        });
+        .unwrap_or_else(|| manifest_dir.join("../../../../../mncs-language"));
     root.join("library")
 }
 
@@ -360,6 +365,29 @@ async fn native_kind_count_executes_through_the_real_tool_surface() {
     )
     .await;
     assert!(result.is_error.unwrap_or(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_symbol_filter_uses_native_matching_through_mcp() {
+    let library = language_library();
+    assert!(library.join("core/sequences.mncs").is_file());
+    assert!(library.join("std/text_scan.mncs").is_file());
+    std::env::set_var("MNCS_LIBRARY_PATH", library);
+
+    let harness = spawn_server().await;
+    let result = call(
+        &harness.peer,
+        "list_symbols".to_owned(),
+        serde_json::json!({ "name_filter": "ING" }),
+    )
+    .await;
+    assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
+    let payload = result.structured_content.expect("structured symbols");
+    assert_eq!(payload["status"]["kind"], "answered");
+    let symbols = payload["symbols"].as_array().expect("symbol list");
+    assert!(symbols
+        .iter()
+        .any(|symbol| symbol["summary"]["name"] == "Reading"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
