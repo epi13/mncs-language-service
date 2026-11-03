@@ -209,12 +209,10 @@ pub struct LanguageCapabilitiesResponse {
 
 pub fn discover(root: Option<&Path>) -> Result<(PathBuf, LanguageCapabilityIndex), ServiceError> {
     let mut candidates = Vec::new();
-    if let Some(path) = env::var_os("MNCS_LANGUAGE_CAPABILITY_INDEX") {
-        candidates.push(PathBuf::from(path));
-    }
-    if let Some(path) = env::var_os("MNCS_LANGUAGE_ROOT") {
-        candidates.push(PathBuf::from(path).join("docs/language-capabilities.json"));
-    }
+    // An explicitly selected workspace root is the caller's authority for
+    // this query. Ambient environment bindings are fallback discovery only;
+    // allowing them to shadow an explicit fixture or workspace root makes
+    // bounded projections depend on the host process's unrelated toolchain.
     if let Some(root) = root {
         candidates.push(root.join("docs/language-capabilities.json"));
         candidates.push(root.join("mncs-language/docs/language-capabilities.json"));
@@ -224,6 +222,12 @@ pub fn discover(root: Option<&Path>) -> Result<(PathBuf, LanguageCapabilityIndex
             candidates.push(path.join("mncs-language/docs/language-capabilities.json"));
             ancestor = path.parent();
         }
+    }
+    if let Some(path) = env::var_os("MNCS_LANGUAGE_CAPABILITY_INDEX") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Some(path) = env::var_os("MNCS_LANGUAGE_ROOT") {
+        candidates.push(PathBuf::from(path).join("docs/language-capabilities.json"));
     }
     if let Ok(current) = env::current_dir() {
         candidates.push(current.join("docs/language-capabilities.json"));

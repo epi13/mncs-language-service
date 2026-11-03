@@ -1,13 +1,12 @@
 mncs 0.13;
 
-// mncs.language_service.semantic_capsule.v1 — native capsule admission policy.
+// mncs.language_service.semantic_capsule.v1 — native capsule ordering and admission policy.
 //
-// The resident host projects measured workspace findings into the fixed
-// envelope in deterministic priority order (severity rank, then kind rank,
-// then identity). This module owns every selection decision: relevance
-// classification, budget admission, overflow accounting, and the
-// completeness verdict. The host applies the returned admission flags
-// mechanically and must not widen them.
+// The resident host projects measured findings into bounded windows in
+// identity order. This module orders each window by severity and kind using
+// the shared numeric sort capability, then owns relevance classification,
+// budget admission, overflow accounting, and the completeness verdict. The
+// host applies the returned order and admission flags mechanically.
 //
 // Severity ranks: 0 = info, 1 = warning, 2 = error.
 // Finding kinds: 0 = diagnostic, 1 = changed subject, 2 = obligation,
@@ -15,6 +14,8 @@ mncs 0.13;
 // Relevance ranks: 0 = informational (context only, never admitted),
 // 1 = watch, 2 = actionable.
 module mncs.language_service.semantic_capsule.v1;
+
+use mncs.std.sort.v1;
 
 record CapsuleFinding {
     severity: i64,
@@ -45,6 +46,107 @@ record CapsuleSelection {
     dropped_count: i64,
     complete: bool,
     valid: bool
+}
+
+record CapsuleOrder {
+    indices: [i64; 64],
+    valid: bool
+}
+
+record CapsuleMerge {
+    indices: [i64; 64],
+    left: u64,
+    right: u64
+}
+
+fn severity_band(severity: i64) -> (result: u64) {
+    if severity == 2 {
+        return 0;
+    }
+    if severity == 1 {
+        return 1;
+    }
+    if severity == 0 {
+        return 2;
+    }
+    return 3;
+}
+
+fn kind_band(kind: i64) -> (result: u64) {
+    if kind == 0 {
+        return 0;
+    }
+    if kind == 1 {
+        return 1;
+    }
+    if kind == 2 {
+        return 2;
+    }
+    if kind == 3 {
+        return 3;
+    }
+    return 4;
+}
+
+// Order one bounded candidate window. Input position is the identity-order
+// tie break assigned by the host's string boundary; severity and kind
+// priority are encoded and sorted here through mncs.std.sort.v1.
+fn order_capsule_window(
+    findings: [CapsuleFinding; 64],
+    count: byte
+) -> (result: CapsuleOrder) {
+    let total: u64 = count as u64;
+    let left_count: u64 = select(total < 32, total, 32);
+    let right_count: u64 = select(total > 32, total -% 32, 0);
+    let empty_left_codes: [u64; 32] = [0; 32];
+    iterate i over empty_left_codes carrying left_codes: [u64; 32] = empty_left_codes {
+        let severity: u64 = severity_band(findings[i].severity);
+        let kind: u64 = kind_band(findings[i].kind);
+        let code: u64 = (severity * 4 + kind) * 64 + (i as u64);
+        next left_codes = replace(left_codes, i, code);
+    }
+    let left_order: [u64; 32] = sort_up(left_codes, left_count);
+    let empty_right_codes: [u64; 32] = [0; 32];
+    iterate i over empty_right_codes carrying right_codes: [u64; 32] = empty_right_codes {
+        let source: u64 = i +% 32;
+        let severity: u64 = severity_band(findings[source].severity);
+        let kind: u64 = kind_band(findings[source].kind);
+        let code: u64 = (severity * 4 + kind) * 64 + source;
+        next right_codes = replace(right_codes, i, code);
+    }
+    let right_order: [u64; 32] = sort_up(right_codes, right_count);
+    let empty_indices: [i64; 64] = [0; 64];
+    let start: CapsuleMerge = CapsuleMerge {
+        indices: empty_indices,
+        left: 0,
+        right: 0
+    };
+    iterate output over empty_indices carrying merged: CapsuleMerge = start {
+        let active: bool = (output as u64) < total;
+        let left_active: bool = merged.left < left_count;
+        let right_active: bool = merged.right < right_count;
+        let left_slot: u64 = select(left_active, merged.left, 0);
+        let right_slot: u64 = select(right_active, merged.right, 0);
+        let left_code: u64 = left_order[left_slot];
+        let right_code: u64 = right_order[right_slot];
+        let take_left: bool = left_active && (!right_active || left_code <= right_code);
+        let chosen: u64 = select(take_left, left_code, right_code);
+        let source: i64 = (chosen % 64) as i64;
+        next merged = CapsuleMerge {
+            ..merged,
+            indices: replace(merged.indices, output, select(active, source, 0)),
+            left: merged.left +% select(take_left, 1, 0),
+            right: merged.right +% select(active && !take_left, 1, 0)
+        };
+    }
+    let indices: [i64; 64] = merged.indices;
+    iterate i over findings carrying valid: bool = true {
+        let active: bool = (i as u64) < total;
+        let severity_valid: bool = findings[i].severity >= 0 && findings[i].severity <= 2;
+        let kind_valid: bool = findings[i].kind >= 0 && findings[i].kind <= 3;
+        next valid = valid && (!active || (severity_valid && kind_valid));
+    }
+    return CapsuleOrder { indices: indices, valid: valid };
 }
 
 // Relevance classification. Errors that name broken source are actionable;

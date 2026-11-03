@@ -301,7 +301,7 @@ impl DependencyFingerprints {
 }
 
 /// Declared `use` target names in source order (duplicates removed).
-fn use_names(text: &str) -> Vec<&str> {
+pub(crate) fn use_names(text: &str) -> Vec<&str> {
     let mut names = Vec::new();
     for line in text.lines().map(str::trim_start) {
         let Some(rest) = line.strip_prefix("use ") else {
