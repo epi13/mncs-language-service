@@ -1,0 +1,35 @@
+mncs 0.13;
+
+// Bounded direct-neighbor summary for the Language Service graph boundary.
+// The host projects authoritative call-edge targets into numeric identity
+// ranks; MNCS owns ordering and duplicate removal for this window.
+module mncs.language_service.call_relation_summary.v1;
+
+use mncs.std.sort.v1;
+
+record NeighborSummary {
+    targets: [u64; 32],
+    count: u64
+}
+
+fn compact_unique(sorted: [u64; 32], count: u64) -> (result: NeighborSummary) {
+    let empty: [u64; 32] = [0; 32];
+    let start: NeighborSummary = NeighborSummary { targets: empty, count: 0 };
+    iterate i over sorted carrying result: NeighborSummary = start {
+        let live: bool = i < count;
+        let previous: u64 = select(i > 0, i -% 1, 0);
+        let changed: bool = live && (i == 0 || sorted[i] != sorted[previous]);
+        let slot: u64 = select(result.count < 32, result.count, 0);
+        let value: u64 = select(changed, sorted[i], result.targets[slot]);
+        next result = NeighborSummary {
+            targets: replace(result.targets, slot, value),
+            count: result.count +% select(changed, 1, 0)
+        };
+    }
+    return result;
+}
+
+fn summarize_neighbors(candidates: [u64; 32], count: byte) -> (result: NeighborSummary) {
+    let ordered: [u64; 32] = sort_up(candidates, count as u64);
+    return compact_unique(ordered, count as u64);
+}

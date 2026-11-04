@@ -11,7 +11,7 @@ type system, resolver, obligation model, identity scheme, or semantic ontology.
 | --- | ---: | ---: | ---: | ---: | --- |
 | obligation summaries | reference/control, projection, validation, differential policy | bounded `StatusSummary` aggregation through `mncs.core.status.v1::summarize8` | no | no | real `native_obligations` service/MCP path; max 8 inputs |
 | symbol queries | authoritative artifact acquisition, current indexes, Unicode lowercase normalization, oversized-input fallback, stable ordering | bounded case-insensitive byte substring matching through `mncs.std.text_scan.v1` and `mncs.core.sequences.v1::count_true<64>` | yes: normalization and compatibility fallback | no | `workspace_symbols` executes up to 64 names per call; each name is up to 64 UTF-8 bytes |
-| relation queries | authoritative call-edge extraction and ordering | no | no | no | next candidate: bounded deterministic edge summaries |
+| relation queries | authoritative call-edge extraction, identity-rank projection, and overflow fallback | bounded ordering and duplicate removal through `mncs.std.sort.v1` | yes: high-degree windows above 32 retain the compatibility path | no | `dependencies` and `dependents` execute the native direct-neighbor summary for windows of up to 32 call edges |
 | candidate summaries | language-owned `Program::semantic_diff` and invalidation | no | no | no | do not shadow authoritative semantic diff |
 | state transitions | document lifecycle, snapshots, locks, invalidation orchestration | no | yes | no | host/service state remains Rust in this tranche |
 | LSP transport | adapter and lifecycle | no | yes | no | unchanged |
@@ -79,11 +79,9 @@ evidence, not a claim that every text-related host responsibility has moved.
 
 ## Prioritized next tranche
 
-1. Convert a bounded direct relationship summary over existing call edges;
-   add explicit duplicate and ordering differential cases.
-2. Reuse those bounded projections in candidate reports without duplicating
+1. Reuse bounded direct relationship summaries in candidate reports without duplicating
    `Program::semantic_diff` or invalidation semantics.
-3. Pressure general library primitives only when a real query requires them;
+2. Pressure general library primitives only when a real query requires them;
    do not introduce unrestricted maps, sets, recursion, or host capabilities
    speculatively.
 

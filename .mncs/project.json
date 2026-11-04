@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-language-service",
-  "revision": 6,
+  "revision": 7,
   "manifest_location": "in-repository",
   "authority": {"note": "Language Service owns resident query/protocol projections and bounded family context; mncs-language owns language semantics and Commons owns family architecture/pressure facts."},
   "organization": {
@@ -22,7 +22,7 @@
   },
   "contracts": {
     "provides": [
-      {"contract": "language-tooling", "version": "1", "kind": "lsp-mcp-service", "stability": "experimental", "fingerprint_sources": ["crates/service-core/", "crates/lsp/", "crates/mcp/"]},
+      {"contract": "language-tooling", "version": "1", "kind": "lsp-mcp-service", "stability": "experimental", "fingerprint_sources": ["crates/service-core/", "crates/lsp/", "crates/mcp/", "mncs/call_relation_summary.mncs"]},
       {"contract": "family-agent-context", "version": "2", "kind": "bounded-authoritative-projection", "stability": "experimental", "fingerprint_sources": ["crates/service-core/src/family_context.rs", "docs/family-agent-context.md"]},
       {"contract": "resident-status", "version": "1", "kind": "resident-lifecycle-probe", "stability": "experimental", "effects": ["read"], "fingerprint_sources": ["tools/mnls_provider.py", "crates/service-core/src/ambient.rs"], "invocation": {"kind": "python", "path": "tools/mnls_provider.py", "fixed_argv": ["status"], "toolchains": {"MNCS_LANGUAGE_ROOT": {"repository": "mncs-language", "path": "."}, "MNCS_STDLIB_ROOT": {"repository": "mncs-stdlib", "path": "."}, "MNCS_LIBRARY_PATH": {"repository": "mncs-stdlib", "path": "library"}}}},
       {"contract": "resident-reconcile", "version": "1", "kind": "resident-lifecycle-recovery", "stability": "experimental", "effects": ["execute"], "fingerprint_sources": ["tools/mnls_provider.py"], "invocation": {"kind": "python", "path": "tools/mnls_provider.py", "fixed_argv": ["ensure"], "toolchains": {"MNCS_LANGUAGE_ROOT": {"repository": "mncs-language", "path": "."}, "MNCS_STDLIB_ROOT": {"repository": "mncs-stdlib", "path": "."}, "MNCS_LIBRARY_PATH": {"repository": "mncs-stdlib", "path": "library"}}}},

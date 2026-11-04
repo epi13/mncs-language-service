@@ -29,6 +29,7 @@ pub mod language_knowledge;
 mod modules;
 mod native_filter;
 mod native_query;
+mod native_relation;
 mod queries;
 mod rename;
 mod render;

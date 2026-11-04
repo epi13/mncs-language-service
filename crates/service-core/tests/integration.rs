@@ -21,8 +21,15 @@ fn stdlib_library() -> PathBuf {
     if let Some(root) = std::env::var_os("MNCS_STDLIB_ROOT").map(PathBuf::from) {
         return root.join("library");
     }
-    let sibling = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../mncs-stdlib");
-    if sibling.join("stdlib-manifest.json").is_file() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let sibling = [
+        manifest_dir.join("../../../mncs-stdlib"),
+        manifest_dir.join("../../../../mncs-stdlib"),
+        manifest_dir.join("../../../../../mncs-stdlib"),
+    ]
+    .into_iter()
+    .find(|path| path.join("stdlib-manifest.json").is_file());
+    if let Some(sibling) = sibling {
         return sibling.join("library");
     }
     let root = std::env::var_os("MNCS_LANGUAGE_ROOT")
@@ -515,6 +522,7 @@ fn describe_returns_structured_semantics_for_machines() {
 
 #[test]
 fn dependencies_and_dependents_use_the_semantic_graph() {
+    std::env::set_var("MNCS_LIBRARY_PATH", stdlib_library());
     let svc = service();
     let uri = fixture_uri(CONTRACTS);
     let text = svc.store().content(&uri).expect("content");
@@ -547,6 +555,72 @@ fn dependencies_and_dependents_use_the_semantic_graph() {
         .dependencies(&uri, "mncs:0.2:function::nowhere::nope")
         .expect("query ran");
     assert!(matches!(missing.status, ResponseStatus::Unresolved { .. }));
+}
+
+#[test]
+fn direct_relation_summary_deduplicates_and_orders_with_the_native_kernel() {
+    std::env::set_var("MNCS_LIBRARY_PATH", stdlib_library());
+    let svc = service();
+    let uri = fixture_uri(CONTRACTS);
+    let source = r#"mncs 0.3;
+
+module examples.relations;
+
+fn target(value: i64) -> (result: i64) { return value; }
+
+fn zeta(value: i64) -> (result: i64) {
+    let once: i64 = target(value);
+    return target(once);
+}
+
+fn alpha(value: i64) -> (result: i64) { return target(value); }
+"#;
+    svc.did_open(&uri, 1, source.to_owned())
+        .expect("open relation fixture");
+
+    let target_offset = source.find("fn target").expect("target declaration") + 3;
+    let target_position =
+        mncs_service_core::PositionMap::new(source).position_of(source, target_offset);
+    let described = svc
+        .describe_position(&uri, target_position.line, target_position.character)
+        .expect("describe target");
+    let target_identity = described
+        .subject
+        .expect("target description")
+        .summary
+        .identity
+        .expect("target identity");
+    let incoming = svc
+        .dependents(&uri, &target_identity)
+        .expect("native direct relation summary");
+    assert_eq!(incoming.status, ResponseStatus::Answered);
+    assert_eq!(
+        incoming
+            .incoming
+            .iter()
+            .map(|edge| edge.name.as_deref().expect("caller name"))
+            .collect::<Vec<_>>(),
+        vec!["alpha", "zeta"],
+        "repeated zeta call sites collapse while identity order remains stable"
+    );
+
+    let zeta_offset = source.find("fn zeta").expect("zeta declaration") + 3;
+    let zeta_position =
+        mncs_service_core::PositionMap::new(source).position_of(source, zeta_offset);
+    let described = svc
+        .describe_position(&uri, zeta_position.line, zeta_position.character)
+        .expect("describe zeta");
+    let zeta_identity = described
+        .subject
+        .expect("zeta description")
+        .summary
+        .identity
+        .expect("zeta identity");
+    let outgoing = svc
+        .dependencies(&uri, &zeta_identity)
+        .expect("native outgoing summary");
+    assert_eq!(outgoing.outgoing.len(), 1);
+    assert_eq!(outgoing.outgoing[0].name.as_deref(), Some("target"));
 }
 
 #[test]

@@ -625,6 +625,7 @@ pub struct LanguageService {
     last_ensured_version: AtomicU64,
     pub(crate) native_kernel: RwLock<Option<Arc<crate::native_query::NativeQueryKernel>>>,
     pub(crate) filter_kernel: RwLock<Option<Arc<crate::native_filter::NativeFilterKernel>>>,
+    pub(crate) relation_kernel: RwLock<Option<Arc<crate::native_relation::RelationKernel>>>,
     pub(crate) capsule_kernel: RwLock<Option<Arc<crate::ambient::CapsuleKernel>>>,
     checkpoint: Mutex<Option<WorkspaceCheckpoint>>,
     instance_id: String,
@@ -664,6 +665,7 @@ impl LanguageService {
             last_ensured_version: AtomicU64::new(u64::MAX),
             native_kernel: RwLock::new(None),
             filter_kernel: RwLock::new(None),
+            relation_kernel: RwLock::new(None),
             capsule_kernel: RwLock::new(None),
             checkpoint: Mutex::new(None),
             instance_id: crate::ambient::new_instance_id(),
@@ -2706,44 +2708,72 @@ impl LanguageService {
                 incoming: Vec::new(),
             });
         };
-        let wanted = SemanticId(identity.to_owned());
-        let known: BTreeSet<SemanticId> = program
-            .functions
-            .iter()
-            .map(|function| mncs_model::function_id(&program.module, &function.name))
-            .collect();
         let mut names: BTreeMap<String, String> = BTreeMap::new();
         for function in &program.functions {
             let identity = mncs_model::function_id(&program.module, &function.name);
             names.insert(identity.0, function.name.clone());
         }
+        // Strings remain at the service boundary. Assigning each known
+        // identity its lexical rank lets the shared numeric Stdlib kernel
+        // preserve the graph API's established ordering without implementing
+        // a string comparator in MNCS.
+        let identity_by_rank = names.keys().cloned().collect::<Vec<_>>();
+        let rank_by_identity = identity_by_rank
+            .iter()
+            .enumerate()
+            .map(|(rank, identity)| (identity.clone(), rank as u64))
+            .collect::<BTreeMap<_, _>>();
+        let wanted_rank = rank_by_identity.get(identity).copied();
 
-        let mut out = Vec::new();
-        let mut inc = Vec::new();
-        for (caller, callee) in function_call_edges(program) {
-            if caller == wanted && outgoing && known.contains(&callee) {
-                out.push(GraphEdgeTarget {
-                    edge_kind: "calls".to_owned(),
-                    identity: callee.0.clone(),
-                    name: names.get(&callee.0).cloned(),
-                });
-            }
-            if callee == wanted && !outgoing && known.contains(&caller) {
-                inc.push(GraphEdgeTarget {
-                    edge_kind: "calls".to_owned(),
-                    identity: caller.0.clone(),
-                    name: names.get(&caller.0).cloned(),
-                });
+        let mut candidates = Vec::new();
+        for (caller, callee) in raw_function_call_edges(program) {
+            let (subject, neighbor) = if outgoing {
+                (&caller.0, &callee.0)
+            } else {
+                (&callee.0, &caller.0)
+            };
+            if subject == identity {
+                if let Some(rank) = rank_by_identity.get(neighbor) {
+                    candidates.push(*rank);
+                }
             }
         }
-        out.sort_by(|left, right| left.identity.cmp(&right.identity));
-        out.dedup();
-        inc.sort_by(|left, right| left.identity.cmp(&right.identity));
-        inc.dedup();
+        let target_ranks = if candidates.is_empty() && wanted_rank.is_none() {
+            Vec::new()
+        } else if candidates.len() <= crate::native_relation::RELATION_WINDOW_CAPACITY {
+            crate::native_relation::execute_neighbor_summary(
+                &self.relation_kernel,
+                &self.store,
+                &candidates,
+            )
+            .map_err(|reason| ServiceError::InvalidRequest { reason })?
+            .targets
+        } else {
+            // Preserve unbounded legacy behavior for high-degree functions;
+            // normal direct-neighbor windows use the native ordering kernel.
+            candidates.sort_unstable();
+            candidates.dedup();
+            candidates
+        };
+        let targets = target_ranks
+            .into_iter()
+            .filter_map(|rank| usize::try_from(rank).ok())
+            .filter_map(|rank| identity_by_rank.get(rank))
+            .map(|identity| GraphEdgeTarget {
+                edge_kind: "calls".to_owned(),
+                identity: identity.clone(),
+                name: names.get(identity).cloned(),
+            })
+            .collect::<Vec<_>>();
+        let (out, inc) = if outgoing {
+            (targets, Vec::new())
+        } else {
+            (Vec::new(), targets)
+        };
 
         let empty = out.is_empty() && inc.is_empty();
         Ok(GraphResponse {
-            status: if empty && !known.contains(&wanted) {
+            status: if empty && wanted_rank.is_none() {
                 ResponseStatus::Unresolved {
                     reason: format!("identity {identity} is not a function of this snapshot"),
                 }
@@ -3206,6 +3236,16 @@ const MAX_PACKET_EXCERPTS: usize = 12;
 /// granularity; this lifts them to the function level without inventing any
 /// relationship the language did not state.
 pub(crate) fn function_call_edges(program: &mncs_model::Program) -> Vec<(SemanticId, SemanticId)> {
+    let mut edges = raw_function_call_edges(program);
+    edges.sort();
+    edges.dedup();
+    edges
+}
+
+/// Raw caller→callee facts from authoritative call operations. Consumers
+/// that need a direct relationship summary pass these facts through the
+/// native bounded ordering/deduplication kernel.
+fn raw_function_call_edges(program: &mncs_model::Program) -> Vec<(SemanticId, SemanticId)> {
     use mncs_model::BodyOperationKind;
     let mut edges = Vec::new();
     for function in &program.functions {
@@ -3222,8 +3262,6 @@ pub(crate) fn function_call_edges(program: &mncs_model::Program) -> Vec<(Semanti
             }
         }
     }
-    edges.sort();
-    edges.dedup();
     edges
 }
 
