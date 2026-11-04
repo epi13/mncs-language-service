@@ -56,6 +56,13 @@ pub struct ObligationDelta {
     pub status_changed: Vec<ObligationStatusChange>,
     pub counts_baseline: StatusCounts,
     pub counts_candidate: StatusCounts,
+    /// Native shared-kernel evidence for the baseline counts. Large sets are
+    /// represented by consecutive eight-obligation windows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_count_windows_baseline: Vec<crate::NativeStatusSummary>,
+    /// Native shared-kernel evidence for the candidate counts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_count_windows_candidate: Vec<crate::NativeStatusSummary>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -135,18 +142,6 @@ fn obligation_map(
     )
 }
 
-fn counts(obligations: &std::collections::BTreeMap<String, CandidateObligation>) -> StatusCounts {
-    let mut counts = StatusCounts::default();
-    for obligation in obligations.values() {
-        match obligation.status.as_str() {
-            "pass" => counts.pass += 1,
-            "fail" => counts.fail += 1,
-            _ => counts.unknown += 1,
-        }
-    }
-    counts
-}
-
 fn diagnostics_codes(analysis: &DocumentAnalysis) -> Vec<String> {
     let mut codes: Vec<String> = analysis
         .diagnostics()
@@ -180,6 +175,80 @@ fn records_to_identities(records: &[IdentityRecord]) -> Vec<String> {
 }
 
 impl LanguageService {
+    fn native_candidate_counts(
+        &self,
+        obligations: &std::collections::BTreeMap<String, CandidateObligation>,
+    ) -> Result<(StatusCounts, Vec<crate::NativeStatusSummary>), ServiceError> {
+        let statuses = obligations
+            .values()
+            .map(|obligation| obligation.status.as_str())
+            .collect::<Vec<_>>();
+        let windows = crate::native_query::execute_status_summaries(
+            &self.native_kernel,
+            &self.store,
+            &statuses,
+        )
+        .map_err(|reason| ServiceError::Unsupported {
+            reason: format!("MNCS-native candidate status counts are unavailable: {reason}"),
+        })?;
+
+        let mut counts = StatusCounts::default();
+        let mut observed = 0usize;
+        for window in &windows {
+            if !window.valid || window.observed_count != window.input_count {
+                return Err(ServiceError::Unsupported {
+                    reason: "MNCS-native candidate status window failed count validation"
+                        .to_owned(),
+                });
+            }
+            let window_counted = window
+                .pass_count
+                .checked_add(window.fail_count)
+                .and_then(|count| count.checked_add(window.unknown_count));
+            if window_counted != Some(window.observed_count) {
+                return Err(ServiceError::Unsupported {
+                    reason:
+                        "MNCS-native candidate status window counts do not match its observed count"
+                            .to_owned(),
+                });
+            }
+            counts.pass = counts.pass.checked_add(window.pass_count).ok_or_else(|| {
+                ServiceError::Unsupported {
+                    reason: "MNCS-native candidate PASS count overflowed the service range"
+                        .to_owned(),
+                }
+            })?;
+            counts.fail = counts.fail.checked_add(window.fail_count).ok_or_else(|| {
+                ServiceError::Unsupported {
+                    reason: "MNCS-native candidate FAIL count overflowed the service range"
+                        .to_owned(),
+                }
+            })?;
+            counts.unknown = counts
+                .unknown
+                .checked_add(window.unknown_count)
+                .ok_or_else(|| ServiceError::Unsupported {
+                    reason: "MNCS-native candidate UNKNOWN count overflowed the service range"
+                        .to_owned(),
+                })?;
+            observed = observed.checked_add(window.observed_count).ok_or_else(|| {
+                ServiceError::Unsupported {
+                    reason: "MNCS-native candidate observed count overflowed the service range"
+                        .to_owned(),
+                }
+            })?;
+        }
+        if observed != obligations.len() {
+            return Err(ServiceError::Unsupported {
+                reason: format!(
+                    "MNCS-native candidate status windows observed {observed} of {} obligations",
+                    obligations.len()
+                ),
+            });
+        }
+        Ok((counts, windows))
+    }
+
     /// Analyze proposed document content as an isolated candidate without
     /// mutating workspace state. The baseline stays authoritative.
     pub fn analyze_candidate(
@@ -318,6 +387,10 @@ impl LanguageService {
         let (obligation_delta, obligations_available) =
             match (&baseline_obligations, &candidate_obligations) {
                 (Some(before), Some(after)) => {
+                    let (counts_baseline, native_count_windows_baseline) =
+                        self.native_candidate_counts(before)?;
+                    let (counts_candidate, native_count_windows_candidate) =
+                        self.native_candidate_counts(after)?;
                     let added = after
                         .values()
                         .filter(|item| !before.contains_key(&item.identity))
@@ -347,8 +420,10 @@ impl LanguageService {
                             added,
                             removed,
                             status_changed,
-                            counts_baseline: counts(before),
-                            counts_candidate: counts(after),
+                            counts_baseline,
+                            counts_candidate,
+                            native_count_windows_baseline,
+                            native_count_windows_candidate,
                         }),
                         true,
                     )

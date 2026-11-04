@@ -4,7 +4,7 @@
 
 use mncs_service_core::{
     serve_unix, DebugCapabilityStatus, LanguageService, LanguageServiceClient,
-    RemoteLanguageService, ResponseStatus, SymbolKind,
+    RemoteLanguageService, ResponseStatus, StatusCounts, SymbolKind,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -46,6 +46,19 @@ fn fixture_uri(name: &str) -> String {
 
 fn service() -> LanguageService {
     LanguageService::new(Some(fixtures_dir()))
+}
+
+fn reference_status_counts<'a>(statuses: impl IntoIterator<Item = &'a str>) -> StatusCounts {
+    let mut counts = StatusCounts::default();
+    for status in statuses {
+        match status {
+            "pass" => counts.pass += 1,
+            "fail" => counts.fail += 1,
+            "unknown" => counts.unknown += 1,
+            other => panic!("unexpected obligation status in independent oracle: {other}"),
+        }
+    }
+    counts
 }
 
 const CONTRACTS: &str = "valid-contracts.mncs";
@@ -990,6 +1003,7 @@ fn read_fixture(name: &str) -> String {
 
 #[test]
 fn candidate_analysis_reports_identity_bound_deltas_without_touching_the_baseline() {
+    std::env::set_var("MNCS_LIBRARY_PATH", stdlib_library());
     let uri = fixture_uri("records.mncs");
     let baseline_text = read_fixture("records.mncs");
     let service = service();
@@ -997,6 +1011,9 @@ fn candidate_analysis_reports_identity_bound_deltas_without_touching_the_baselin
     service
         .did_open(&uri, 1, baseline_text.clone())
         .expect("open");
+    let baseline_obligations = service
+        .obligations(&uri, None)
+        .expect("baseline obligations");
 
     // Candidate: change a function body so its identity fingerprint changes.
     let candidate_text =
@@ -1017,11 +1034,137 @@ fn candidate_analysis_reports_identity_bound_deltas_without_touching_the_baselin
         !semantic.changed.is_empty() || !semantic.added.is_empty(),
         "a body change must touch at least one semantic identity: {semantic:#?}"
     );
+    let obligation_delta = response.obligations.as_ref().expect("both sides elaborate");
+
+    let expected_baseline = reference_status_counts(
+        baseline_obligations
+            .obligations
+            .iter()
+            .map(|item| item.status.as_str()),
+    );
+    let mut expected_candidate = baseline_obligations
+        .obligations
+        .iter()
+        .map(|item| (item.identity.clone(), item.status.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for identity in &obligation_delta.removed {
+        expected_candidate.remove(identity);
+    }
+    for changed in &obligation_delta.status_changed {
+        expected_candidate.insert(changed.identity.clone(), changed.after.clone());
+    }
+    for added in &obligation_delta.added {
+        expected_candidate.insert(added.identity.clone(), added.status.clone());
+    }
+    let expected_candidate =
+        reference_status_counts(expected_candidate.values().map(String::as_str));
+    assert_eq!(obligation_delta.counts_baseline, expected_baseline);
+    assert_eq!(obligation_delta.counts_candidate, expected_candidate);
+
+    for (windows, expected_inputs) in [
+        (
+            &obligation_delta.native_count_windows_baseline,
+            baseline_obligations.obligations.len(),
+        ),
+        (
+            &obligation_delta.native_count_windows_candidate,
+            expected_candidate.pass + expected_candidate.fail + expected_candidate.unknown,
+        ),
+    ] {
+        assert!(
+            !windows.is_empty(),
+            "zero-input summaries still carry native evidence"
+        );
+        assert_eq!(
+            windows.iter().map(|item| item.input_count).sum::<usize>(),
+            expected_inputs
+        );
+        assert!(windows
+            .iter()
+            .all(|item| item.valid && item.observed_count == item.input_count));
+        assert!(windows
+            .iter()
+            .all(|item| !item.kernel_artifact_identity.is_empty()));
+        assert!(windows
+            .iter()
+            .all(|item| !item.dependency_source_identity.is_empty()));
+    }
 
     // The workspace baseline is untouched: the resident snapshot still
     // carries the baseline source identity.
     let resident = service.snapshot(&uri).expect("resident snapshot");
     assert_eq!(resident.source_identity, response.baseline_source_identity);
+}
+
+#[test]
+fn candidate_analysis_counts_large_obligation_sets_in_multiple_native_windows() {
+    std::env::set_var("MNCS_LIBRARY_PATH", stdlib_library());
+    let uri = fixture_uri(CONTRACTS);
+    let baseline_text = read_fixture(CONTRACTS);
+    let service = service();
+    service
+        .did_open(&uri, 1, baseline_text.clone())
+        .expect("open baseline");
+    let baseline_obligations = service
+        .obligations(&uri, None)
+        .expect("baseline obligations");
+
+    let mut candidate_text = baseline_text.replace("return next;", "return next + 1;");
+    for index in 0..12 {
+        candidate_text.push_str(&format!(
+            "\nfn extra_{index}(n: i64) -> (result: i64)\n    requires n_within_limit\n{{\n    return n;\n}}\n"
+        ));
+    }
+    let response = service
+        .analyze_candidate(&uri, &candidate_text)
+        .expect("candidate analysis");
+    assert_eq!(response.status, ResponseStatus::Answered);
+    assert!(response.candidate_elaborates);
+    let delta = response.obligations.as_ref().expect("obligation delta");
+    assert!(
+        delta.native_count_windows_candidate.len() > 1,
+        "the candidate must cross the native eight-obligation window"
+    );
+
+    let mut expected_candidate = baseline_obligations
+        .obligations
+        .iter()
+        .map(|item| (item.identity.clone(), item.status.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for identity in &delta.removed {
+        expected_candidate.remove(identity);
+    }
+    for changed in &delta.status_changed {
+        expected_candidate.insert(changed.identity.clone(), changed.after.clone());
+    }
+    for added in &delta.added {
+        expected_candidate.insert(added.identity.clone(), added.status.clone());
+    }
+    assert_eq!(
+        delta.counts_baseline,
+        reference_status_counts(
+            baseline_obligations
+                .obligations
+                .iter()
+                .map(|item| item.status.as_str())
+        )
+    );
+    assert_eq!(
+        delta.counts_candidate,
+        reference_status_counts(expected_candidate.values().map(String::as_str))
+    );
+    assert_eq!(
+        delta
+            .native_count_windows_candidate
+            .iter()
+            .map(|window| window.input_count)
+            .sum::<usize>(),
+        expected_candidate.len()
+    );
+    assert!(delta
+        .native_count_windows_candidate
+        .iter()
+        .all(|window| { window.valid && window.input_count == window.observed_count }));
 }
 
 #[test]

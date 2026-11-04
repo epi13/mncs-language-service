@@ -370,6 +370,24 @@ pub(crate) fn execute_status_summary(
     })
 }
 
+/// Execute the shared MNCS status fold for any number of obligations by
+/// partitioning transport into the kernel's exact eight-item envelope.
+/// Empty input still executes one empty summary so callers retain explicit
+/// native evidence for a zero-obligation result.
+pub(crate) fn execute_status_summaries(
+    cache: &RwLock<Option<Arc<NativeQueryKernel>>>,
+    store: &DocumentStore,
+    statuses: &[&str],
+) -> Result<Vec<NativeStatusSummary>, String> {
+    if statuses.is_empty() {
+        return execute_status_summary(cache, store, &[]).map(|summary| vec![summary]);
+    }
+    statuses
+        .chunks(MAX_OBLIGATIONS)
+        .map(|window| execute_status_summary(cache, store, window))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +427,52 @@ mod tests {
 
         let error = execute_status_summary(&cache, &store, &statuses).unwrap_err();
         assert!(error.contains("bounded to 8 obligations"));
+    }
+
+    #[test]
+    fn status_summaries_cover_arbitrary_inputs_in_native_windows() {
+        let cache = RwLock::new(None);
+        let store = DocumentStore::new(None);
+        let statuses = [
+            "pass", "fail", "unknown", "pass", "unknown", "fail", "pass", "pass", "unknown",
+            "fail", "pass", "unknown", "unknown", "pass", "fail", "pass", "unknown",
+        ];
+
+        let summaries = execute_status_summaries(&cache, &store, &statuses)
+            .expect("bounded native status windows");
+        assert_eq!(summaries.len(), 3);
+        assert_eq!(
+            summaries.iter().map(|item| item.input_count).sum::<usize>(),
+            statuses.len()
+        );
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|item| item.observed_count)
+                .sum::<usize>(),
+            statuses.len()
+        );
+        assert_eq!(
+            summaries.iter().map(|item| item.pass_count).sum::<usize>(),
+            7
+        );
+        assert_eq!(
+            summaries.iter().map(|item| item.fail_count).sum::<usize>(),
+            4
+        );
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|item| item.unknown_count)
+                .sum::<usize>(),
+            6
+        );
+        assert!(summaries.iter().all(|item| item.valid));
+        assert!(summaries
+            .iter()
+            .all(|item| item.backend == RESEARCH_BYTECODE_BACKEND_NAME));
+        assert!(summaries
+            .iter()
+            .all(|item| item.kernel_artifact_identity == summaries[0].kernel_artifact_identity));
     }
 }

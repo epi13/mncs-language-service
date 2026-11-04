@@ -12,7 +12,7 @@ type system, resolver, obligation model, identity scheme, or semantic ontology.
 | obligation summaries | reference/control, projection, validation, differential policy | bounded `StatusSummary` aggregation through `mncs.core.status.v1::summarize8` | no | no | real `native_obligations` service/MCP path; max 8 inputs |
 | symbol queries | authoritative artifact acquisition, current indexes, Unicode lowercase normalization, oversized-input fallback, stable ordering | bounded case-insensitive byte substring matching through `mncs.std.text_scan.v1` and `mncs.core.sequences.v1::count_true<64>` | yes: normalization and compatibility fallback | no | `workspace_symbols` executes up to 64 names per call; each name is up to 64 UTF-8 bytes |
 | relation queries | authoritative call-edge extraction, identity-rank projection, and overflow fallback | bounded ordering and duplicate removal through `mncs.std.sort.v1` | yes: high-degree windows above 32 retain the compatibility path | no | `dependencies` and `dependents` execute the native direct-neighbor summary for windows of up to 32 call edges |
-| candidate summaries | language-owned `Program::semantic_diff` and invalidation | no | no | no | do not shadow authoritative semantic diff |
+| candidate summaries | language-owned `Program::semantic_diff`, invalidation, and obligation generation | bounded candidate obligation status counts through the shared `mncs.core.status.v1::summarize8` kernel, with source/dependency/artifact evidence per window | candidate-to-kernel projection, eight-item windowing, checked aggregation of native counts | no | do not shadow authoritative semantic diff or invalidation |
 | state transitions | document lifecycle, snapshots, locks, invalidation orchestration | no | yes | no | host/service state remains Rust in this tranche |
 | LSP transport | adapter and lifecycle | no | yes | no | unchanged |
 | MCP transport | adapter and lifecycle | no | yes | no | `native_obligations` is a thin read-only adapter |
@@ -46,6 +46,26 @@ to `PASS` because execution succeeded.
   equivalence. Only research-bytecode support is claimed for this query.
 - The service still requires `MNCS_LIBRARY_PATH` to resolve the authoritative
   status module; it does not copy that module into the service.
+
+## Candidate obligation status counts
+
+Candidate analysis now uses the same shared status kernel for baseline and
+candidate obligation counts. Rust projects the authoritative finite status
+labels into consecutive eight-item windows, executes each window through the
+resident research-bytecode artifact, validates every observed count, and adds
+the returned numeric subtotals. The response carries each window's kernel,
+Stdlib dependency, and artifact identities so consumers can distinguish a
+native summary from a host-only count. An empty obligation set executes one
+empty native window and remains an explicit zero summary. Kernel absence,
+invalid output, overflow, or a short observation fails the candidate query;
+there is no duplicate production status-fold fallback.
+
+The candidate integration test computes independent expected counts from the
+resident Rust obligation response and applies the returned obligation deltas
+to derive the candidate expectation. A separate native-kernel test crosses
+the eight-item boundary and verifies every status category across three
+windows. Language-owned semantic diff, invalidation, and obligation generation
+remain the authorities for candidate meaning.
 
 ## Workspace symbol substring slice
 
