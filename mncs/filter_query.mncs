@@ -7,7 +7,7 @@ module mncs.language_service.filter_query.v1;
 use mncs.core.sequences.v1;
 use mncs.std.text_scan.v1 as text_scan;
 
-record SymbolMatchResult {
+record TextMatchResult {
     matched: [bool; 64],
     matched_count: i64,
     valid: bool
@@ -21,9 +21,9 @@ fn match_names(
     names: [[byte; up_to 64]; up_to 64],
     needle: [byte; 64],
     needle_length: byte
-) -> (result: SymbolMatchResult) {
+) -> (result: TextMatchResult) {
     if needle_length > 64 {
-        return SymbolMatchResult {
+        return TextMatchResult {
             matched: [false; 64],
             matched_count: 0,
             valid: false
@@ -38,7 +38,35 @@ fn match_names(
             text_scan.contains<64>(names[i], names[i].len, needle, length)
         );
     }
-    return SymbolMatchResult {
+    return TextMatchResult {
+        matched: matched,
+        matched_count: count_true<64>(matched),
+        valid: true
+    };
+}
+
+fn match_prefixes(
+    names: [[byte; up_to 64]; up_to 64],
+    prefix: [byte; 64],
+    prefix_length: byte
+) -> (result: TextMatchResult) {
+    if prefix_length > 64 {
+        return TextMatchResult {
+            matched: [false; 64],
+            matched_count: 0,
+            valid: false
+        };
+    }
+    let length: u64 = prefix_length as u64;
+    let initial: [bool; 64] = [false; 64];
+    iterate i over names carrying matched: [bool; 64] = initial {
+        next matched = replace(
+            matched,
+            i,
+            text_scan.starts_with<64>(names[i], names[i].len, prefix, length)
+        );
+    }
+    return TextMatchResult {
         matched: matched,
         matched_count: count_true<64>(matched),
         valid: true

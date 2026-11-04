@@ -375,6 +375,7 @@ pub(crate) fn compute_completion(
     snapshot: &DocumentAnalysis,
     line: u32,
     character: u32,
+    native_prefix_matches: &mut dyn FnMut(&[String], &str) -> Option<Vec<bool>>,
 ) -> Vec<CompletionCandidate> {
     let text = snapshot.text();
     let byte = snapshot.positions.offset_of(text, line, character);
@@ -426,14 +427,21 @@ pub(crate) fn compute_completion(
     // detection: the dots in a module path are separators, not member
     // access.
     if let Some(module_prefix) = use_line_prefix(text, line, character) {
-        return module_completions(&module_prefix);
+        return module_completions(&module_prefix, native_prefix_matches);
     }
 
     if member_context {
         return member_completions(uri, snapshot, cursor_index, &significant);
     }
 
-    scoped_candidates(uri, snapshot, byte, &prefix, !prefix.is_empty())
+    scoped_candidates(
+        uri,
+        snapshot,
+        byte,
+        &prefix,
+        !prefix.is_empty(),
+        native_prefix_matches,
+    )
 }
 
 /// The partially typed module path when the cursor sits on a `use` line
@@ -464,16 +472,111 @@ fn use_line_prefix(text: &str, line: u32, character: u32) -> Option<String> {
 
 /// Module-path candidates from the discovered stdlib manifest,
 /// prefix-filtered. Best-effort: no manifest, no candidates.
-fn module_completions(prefix: &str) -> Vec<CompletionCandidate> {
-    crate::modules::stdlib_manifest_modules()
-        .into_iter()
-        .filter(|(name, _)| name.starts_with(prefix))
-        .map(|(name, profile)| CompletionCandidate {
+fn module_completions(
+    prefix: &str,
+    native_prefix_matches: &mut dyn FnMut(&[String], &str) -> Option<Vec<bool>>,
+) -> Vec<CompletionCandidate> {
+    let mut collector =
+        CompletionCollector::new(prefix, !prefix.is_empty(), false, native_prefix_matches);
+    for (name, profile) in crate::modules::stdlib_manifest_modules() {
+        collector.consider(CompletionCandidate {
             label: name,
             class: CompletionClass::Module,
             detail: Some(format!("stdlib (profile {profile})")),
-        })
-        .collect()
+        });
+    }
+    collector.finish(false)
+}
+
+/// Collect completion results while keeping prefix work and temporary memory
+/// bounded to one MNCS batch. The Rust predicate remains the fallback for
+/// labels outside the byte-view envelope or when native execution is absent.
+struct CompletionCollector<'a> {
+    prefix: &'a str,
+    filter_by_prefix: bool,
+    deduplicate: bool,
+    seen: BTreeSet<String>,
+    pending: Vec<CompletionCandidate>,
+    items: Vec<CompletionCandidate>,
+    native_prefix_matches: &'a mut dyn FnMut(&[String], &str) -> Option<Vec<bool>>,
+}
+
+impl<'a> CompletionCollector<'a> {
+    fn new(
+        prefix: &'a str,
+        filter_by_prefix: bool,
+        deduplicate: bool,
+        native_prefix_matches: &'a mut dyn FnMut(&[String], &str) -> Option<Vec<bool>>,
+    ) -> Self {
+        Self {
+            prefix,
+            filter_by_prefix,
+            deduplicate,
+            seen: BTreeSet::new(),
+            pending: Vec::new(),
+            items: Vec::new(),
+            native_prefix_matches,
+        }
+    }
+
+    fn consider(&mut self, candidate: CompletionCandidate) {
+        if self.filter_by_prefix {
+            self.pending.push(candidate);
+            if self.pending.len() == crate::native_filter::MAX_TEXT_MATCH_ITEMS {
+                self.flush_prefix_batch();
+            }
+        } else {
+            self.push(candidate);
+        }
+    }
+
+    fn flush_prefix_batch(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let batch = std::mem::take(&mut self.pending);
+        let native_mask = if self.prefix.len() <= crate::native_filter::MAX_TEXT_MATCH_BYTES
+            && batch.iter().all(|candidate| {
+                candidate.label.len() <= crate::native_filter::MAX_TEXT_MATCH_BYTES
+            }) {
+            let labels: Vec<String> = batch
+                .iter()
+                .map(|candidate| candidate.label.clone())
+                .collect();
+            (self.native_prefix_matches)(&labels, self.prefix)
+                .filter(|mask| mask.len() == batch.len())
+        } else {
+            None
+        };
+
+        for (index, candidate) in batch.into_iter().enumerate() {
+            let matches = native_mask
+                .as_ref()
+                .map(|mask| mask[index])
+                .unwrap_or_else(|| candidate.label.starts_with(self.prefix));
+            if matches {
+                self.push(candidate);
+            }
+        }
+    }
+
+    fn push(&mut self, candidate: CompletionCandidate) {
+        if !self.deduplicate || self.seen.insert(candidate.label.clone()) {
+            self.items.push(candidate);
+        }
+    }
+
+    fn finish(mut self, sort_and_limit: bool) -> Vec<CompletionCandidate> {
+        if self.filter_by_prefix {
+            self.flush_prefix_batch();
+        }
+        if sort_and_limit {
+            self.items
+                .sort_by(|left, right| left.label.cmp(&right.label));
+            self.items.truncate(MAX_COMPLETION_ITEMS);
+        }
+        self.items
+    }
 }
 
 fn member_completions(
@@ -590,58 +693,32 @@ fn scoped_candidates(
     byte: usize,
     prefix: &str,
     filter_by_prefix: bool,
+    native_prefix_matches: &mut dyn FnMut(&[String], &str) -> Option<Vec<bool>>,
 ) -> Vec<CompletionCandidate> {
-    let mut seen = BTreeSet::new();
-    let mut items: Vec<CompletionCandidate> = Vec::new();
-
-    fn consider(
-        items: &mut Vec<CompletionCandidate>,
-        seen: &mut BTreeSet<String>,
-        candidate: CompletionCandidate,
-        prefix: &str,
-        filter_by_prefix: bool,
-    ) {
-        if filter_by_prefix && !candidate.label.starts_with(prefix) {
-            return;
-        }
-        if seen.insert(candidate.label.clone()) {
-            items.push(candidate);
-        }
-    }
+    let mut collector =
+        CompletionCollector::new(prefix, filter_by_prefix, true, native_prefix_matches);
 
     // Visible locals along the elaboration path to the cursor.
     if let Some(ast) = snapshot.front_end.ast.as_ref() {
         if let Some(function) = function_at(ast, byte) {
             for parameter in &function.inputs {
-                consider(
-                    &mut items,
-                    &mut seen,
-                    CompletionCandidate {
-                        label: parameter.name.text.clone(),
-                        class: CompletionClass::Symbol(SymbolKind::Parameter),
-                        detail: Some(format!(
-                            "{}: {}",
-                            parameter.name.text, parameter.value_type.text
-                        )),
-                    },
-                    prefix,
-                    filter_by_prefix,
-                );
+                collector.consider(CompletionCandidate {
+                    label: parameter.name.text.clone(),
+                    class: CompletionClass::Symbol(SymbolKind::Parameter),
+                    detail: Some(format!(
+                        "{}: {}",
+                        parameter.name.text, parameter.value_type.text
+                    )),
+                });
             }
             let mut visible = Vec::new();
             collect_visible_locals(&function.body.statements, byte, &mut visible);
             for (name, _type_name) in visible {
-                consider(
-                    &mut items,
-                    &mut seen,
-                    CompletionCandidate {
-                        label: name,
-                        class: CompletionClass::Variable,
-                        detail: None,
-                    },
-                    prefix,
-                    filter_by_prefix,
-                );
+                collector.consider(CompletionCandidate {
+                    label: name,
+                    class: CompletionClass::Variable,
+                    detail: None,
+                });
             }
         }
     }
@@ -652,49 +729,29 @@ fn scoped_candidates(
             entry.kind,
             SymbolKind::Function | SymbolKind::FiniteType | SymbolKind::RecordType
         ) {
-            consider(
-                &mut items,
-                &mut seen,
-                candidate_from(uri, snapshot, index),
-                prefix,
-                filter_by_prefix,
-            );
+            collector.consider(candidate_from(uri, snapshot, index));
         }
     }
 
     // Builtins and keywords.
     for builtin in indexes::BUILTIN_TYPE_NAMES {
-        consider(
-            &mut items,
-            &mut seen,
-            CompletionCandidate {
-                label: builtin.to_owned(),
-                class: CompletionClass::BuiltinType,
-                detail: Some("builtin scalar type".to_owned()),
-            },
-            prefix,
-            filter_by_prefix,
-        );
+        collector.consider(CompletionCandidate {
+            label: builtin.to_owned(),
+            class: CompletionClass::BuiltinType,
+            detail: Some("builtin scalar type".to_owned()),
+        });
     }
     if filter_by_prefix {
         for keyword in KEYWORDS {
-            consider(
-                &mut items,
-                &mut seen,
-                CompletionCandidate {
-                    label: keyword.to_owned(),
-                    class: CompletionClass::Keyword,
-                    detail: None,
-                },
-                prefix,
-                filter_by_prefix,
-            );
+            collector.consider(CompletionCandidate {
+                label: keyword.to_owned(),
+                class: CompletionClass::Keyword,
+                detail: None,
+            });
         }
     }
 
-    items.sort_by(|left, right| left.label.cmp(&right.label));
-    items.truncate(MAX_COMPLETION_ITEMS);
-    items
+    collector.finish(true)
 }
 
 const MAX_COMPLETION_ITEMS: usize = 200;
@@ -776,5 +833,87 @@ fn stmt_span(statement: &AstStmt) -> mncs_syntax::SourceSpan {
         | AstStmt::Fail { span, .. }
         | AstStmt::Return { span, .. }
         | AstStmt::BoundedIteration { span, .. } => *span,
+    }
+}
+
+#[cfg(test)]
+mod completion_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn completion_prefix_collection_executes_bounded_native_batches() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let library = [
+            manifest_dir.join("../../../mncs-stdlib/library"),
+            manifest_dir.join("../../../../mncs-stdlib/library"),
+            manifest_dir.join("../../../../../mncs-stdlib/library"),
+        ]
+        .into_iter()
+        .find(|path| path.join("core/sequences.mncs").is_file())
+        .expect("sibling MNCS standard library");
+        std::env::set_var("MNCS_LIBRARY_PATH", &library);
+
+        let cache = std::sync::RwLock::new(None);
+        let store = crate::document::DocumentStore::new(None);
+        let mut native_calls = 0;
+        let mut native_prefix_matches = |labels: &[String], prefix: &str| {
+            native_calls += 1;
+            assert!(labels.len() <= crate::native_filter::MAX_TEXT_MATCH_ITEMS);
+            let names = labels
+                .iter()
+                .map(|label| label.as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            let native = crate::native_filter::execute_prefix_matches(
+                &cache,
+                &store,
+                &names,
+                prefix.as_bytes(),
+            )
+            .expect("MNCS native completion prefix execution");
+            if !native.valid || native.input_count != labels.len() {
+                panic!("native completion prefix result failed validation");
+            }
+            Some(
+                native
+                    .matched
+                    .get(..labels.len())
+                    .expect("native prefix mask covers the input window")
+                    .to_vec(),
+            )
+        };
+        let mut collector =
+            CompletionCollector::new("alpha_", true, true, &mut native_prefix_matches);
+        for index in 0..130 {
+            let (label, class) = if index % 2 == 0 {
+                (format!("alpha_{index}"), CompletionClass::Keyword)
+            } else {
+                (format!("beta_{index}"), CompletionClass::Keyword)
+            };
+            collector.consider(CompletionCandidate {
+                label,
+                class,
+                detail: None,
+            });
+        }
+        collector.consider(CompletionCandidate {
+            label: "alpha_0".to_owned(),
+            class: CompletionClass::Keyword,
+            detail: None,
+        });
+        let candidates = collector.finish(true);
+
+        let mut expected: Vec<String> = (0..130)
+            .filter(|index| index % 2 == 0)
+            .map(|index| format!("alpha_{index}"))
+            .collect();
+        expected.sort();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.label.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(native_calls, 3, "131 candidates use 64-item native windows");
     }
 }

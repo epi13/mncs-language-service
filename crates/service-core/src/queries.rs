@@ -2117,8 +2117,8 @@ impl LanguageService {
                     };
                     if needle.is_empty() {
                         hits.push(candidate);
-                    } else if lower_name.len() > crate::native_filter::MAX_SYMBOL_NAME_BYTES
-                        || needle.len() > crate::native_filter::MAX_SYMBOL_NAME_BYTES
+                    } else if lower_name.len() > crate::native_filter::MAX_TEXT_MATCH_BYTES
+                        || needle.len() > crate::native_filter::MAX_TEXT_MATCH_BYTES
                     {
                         // MNCS receives only names and needles that fit its
                         // explicit byte-view contract. Keep the old Rust
@@ -2169,9 +2169,9 @@ impl LanguageService {
                 .1
                 .len()
                 .saturating_add(1)
-                .saturating_mul(crate::native_filter::MAX_SYMBOL_NAME_BYTES);
+                .saturating_mul(crate::native_filter::MAX_TEXT_MATCH_BYTES);
             if !batch.is_empty()
-                && (batch.len() == crate::native_filter::MAX_SYMBOL_MATCH_NAMES
+                && (batch.len() == crate::native_filter::MAX_TEXT_MATCH_ITEMS
                     || batch_scan_work.saturating_add(candidate_work)
                         > crate::native_filter::MAX_SYMBOL_SCAN_WORK_PER_CALL)
             {
@@ -3058,7 +3058,23 @@ impl LanguageService {
                 incomplete: false,
             });
         }
-        let items = compute_completion(uri, &snapshot, line, character);
+        let items = compute_completion(uri, &snapshot, line, character, &mut |labels, prefix| {
+            let names = labels
+                .iter()
+                .map(|label| label.as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            let native = crate::native_filter::execute_prefix_matches(
+                &self.filter_kernel,
+                &self.store,
+                &names,
+                prefix.as_bytes(),
+            )
+            .ok()?;
+            if !native.valid || native.input_count != labels.len() {
+                return None;
+            }
+            native.matched.get(..labels.len()).map(<[bool]>::to_vec)
+        });
         Ok(CompletionResponse {
             status: ResponseStatus::Answered,
             snapshot: Some(snapshot_info(uri, &snapshot)),

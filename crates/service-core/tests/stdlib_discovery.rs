@@ -65,6 +65,14 @@ fn stdlib_discovery_resolution_and_completion() {
         "manifest module proposed on the use line: {:#?}",
         items.items
     );
+    assert!(
+        items
+            .items
+            .iter()
+            .all(|candidate| candidate.label.starts_with("mncs.demo.w")),
+        "module-path prefix results preserve the independent Rust expectation: {:#?}",
+        items.items
+    );
 
     // Phase 3: an empty root disables discovery; the manifest contributes
     // no names and the consumer no longer resolves.

@@ -869,6 +869,14 @@ fn completion_is_conservative_but_useful() {
         "keyword completed from prefix: {:#?}",
         items.items
     );
+    assert!(
+        items
+            .items
+            .iter()
+            .all(|candidate| candidate.label.starts_with("ret")),
+        "prefix results preserve the independent Rust `starts_with` expectation: {:#?}",
+        items.items
+    );
 
     // Member completion on a nominal type constructor namespace.
     let variant_offset = text.find("Verdict.Pass").expect("constructor");

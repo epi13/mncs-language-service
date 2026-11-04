@@ -45,7 +45,7 @@ resident authoritative analysis   (mncs-syntax → mncs-compiler → mncs-model)
 identity-bound snapshot           (mncs:source:artifact:<sha256> + workspace generation)
    ↓
 shared semantic query core        (mncs-service-core)
-   ├── MNCS-native bounded query kernel (real mncs-language compilation/execution)
+   ├── MNCS-native bounded query kernels (kind counts, symbol search, and completion prefixes)
    ├── LSP  → mncs-lsp            editor diagnostics/navigation/hover/tokens/completion
    └── MCP  → mncs-mcp            agent semantic inspection (read-only)
 ```

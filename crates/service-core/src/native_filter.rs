@@ -1,10 +1,10 @@
-//! MNCS-native query kernels for bounded symbol-kind and workspace-name filtering.
+//! MNCS-native query kernels for bounded symbol-kind and text-prefix filtering.
 //!
-//! Kind counting uses `mncs.core.sequences.v1::count`; name matching delegates
-//! literal byte scanning to `mncs.std.text_scan.v1::contains` and summarizes
-//! the mask with `count_true`. The service projects bounded inputs, executes
-//! the frozen `mncs-research-bytecode` artifact, and validates identity-bound
-//! results. Filter semantics live in imported Standard modules.
+//! Kind counting uses `mncs.core.sequences.v1::count`; substring and prefix
+//! matching delegate byte scanning to `mncs.std.text_scan.v1`. The service
+//! projects bounded inputs, executes the frozen `mncs-research-bytecode`
+//! artifact, and validates identity-bound results. Filter semantics live in
+//! imported Standard modules.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
@@ -24,14 +24,17 @@ pub(crate) const FILTER_MODULE: &str = "mncs.core.sequences.v1";
 pub(crate) const FILTER_QUERY_MODULE: &str = "mncs.language_service.filter_query.v1";
 pub(crate) const FILTER_QUERY_FUNCTION: &str = "count_matching";
 const SYMBOL_MATCH_FUNCTION: &str = "match_names";
+const PREFIX_MATCH_FUNCTION: &str = "match_prefixes";
+const TEXT_MATCH_RESULT_TYPE: &str = "TextMatchResult";
 pub(crate) const MAX_FILTER_TAGS: usize = 8;
-pub(crate) const MAX_SYMBOL_MATCH_NAMES: usize = 64;
-pub(crate) const MAX_SYMBOL_NAME_BYTES: usize = 64;
+pub(crate) const MAX_TEXT_MATCH_ITEMS: usize = 64;
+pub(crate) const MAX_TEXT_MATCH_BYTES: usize = 64;
 // `text_scan.contains` examines at most haystack_length * 64 byte slots.
 // Keep one call to eight full-width windows including per-start overhead, even
 // though the fixed result envelope can select up to 64 shorter names.
 pub(crate) const MAX_SYMBOL_SCAN_WORK_PER_CALL: usize =
-    (MAX_SYMBOL_MATCH_NAMES / 8) * (MAX_SYMBOL_NAME_BYTES + 1) * MAX_SYMBOL_NAME_BYTES;
+    (MAX_TEXT_MATCH_ITEMS / 8) * (MAX_TEXT_MATCH_BYTES + 1) * MAX_TEXT_MATCH_BYTES;
+const MAX_PREFIX_SCAN_WORK_PER_CALL: usize = MAX_TEXT_MATCH_ITEMS * MAX_TEXT_MATCH_BYTES;
 const TEXT_SCAN_MODULE: &str = "mncs.std.text_scan.v1";
 const BYTES_MODULE: &str = "mncs.core.bytes.v1";
 const FILTER_QUERY_URI: &str = "mncs://language-service/filter-query.mncs";
@@ -74,7 +77,7 @@ pub struct NativeFilterSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NativeSymbolMatchSummary {
+pub(crate) struct NativeTextMatchSummary {
     pub backend: String,
     pub kernel_source_identity: String,
     pub dependency_source_identity: String,
@@ -354,22 +357,22 @@ fn fixed_byte_argument(bytes: &[u8], width: usize) -> ExecutionValue {
     }
 }
 
-fn boolean_sequence_result(value: &ExecutionValue) -> Result<Vec<bool>, String> {
+fn boolean_sequence_result(value: &ExecutionValue, label: &str) -> Result<Vec<bool>, String> {
     let ExecutionValue::Sequence { values } = value else {
-        return Err("MNCS-native symbol match returned a non-sequence mask".to_owned());
+        return Err(format!("MNCS-native {label} returned a non-sequence mask"));
     };
-    if values.len() != MAX_SYMBOL_MATCH_NAMES {
+    if values.len() != MAX_TEXT_MATCH_ITEMS {
         return Err(format!(
-            "MNCS-native symbol match returned {} mask slots instead of {}",
+            "MNCS-native text match returned {} mask slots instead of {}",
             values.len(),
-            MAX_SYMBOL_MATCH_NAMES
+            MAX_TEXT_MATCH_ITEMS
         ));
     }
     values
         .iter()
         .map(|value| match value {
             ExecutionValue::Boolean { value } => Ok(*value),
-            _ => Err("MNCS-native symbol match returned a non-boolean mask slot".to_owned()),
+            _ => Err("MNCS-native text match returned a non-boolean mask slot".to_owned()),
         })
         .collect()
 }
@@ -383,40 +386,99 @@ pub(crate) fn execute_symbol_matches(
     store: &DocumentStore,
     names: &[Vec<u8>],
     needle: &[u8],
-) -> Result<NativeSymbolMatchSummary, String> {
-    if names.len() > MAX_SYMBOL_MATCH_NAMES {
+) -> Result<NativeTextMatchSummary, String> {
+    execute_text_matches(cache, store, TextMatchKind::Contains, names, needle)
+}
+
+/// Match a bounded batch of UTF-8 completion labels against one exact prefix.
+/// For valid UTF-8, byte-prefix equality has the same result as `str::starts_with`.
+pub(crate) fn execute_prefix_matches(
+    cache: &RwLock<Option<Arc<NativeFilterKernel>>>,
+    store: &DocumentStore,
+    names: &[Vec<u8>],
+    prefix: &[u8],
+) -> Result<NativeTextMatchSummary, String> {
+    execute_text_matches(cache, store, TextMatchKind::Prefix, names, prefix)
+}
+
+#[derive(Clone, Copy)]
+enum TextMatchKind {
+    Contains,
+    Prefix,
+}
+
+impl TextMatchKind {
+    fn function(self) -> &'static str {
+        match self {
+            Self::Contains => SYMBOL_MATCH_FUNCTION,
+            Self::Prefix => PREFIX_MATCH_FUNCTION,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Contains => "symbol matching",
+            Self::Prefix => "completion prefix matching",
+        }
+    }
+
+    fn max_scan_work(self) -> usize {
+        match self {
+            Self::Contains => MAX_SYMBOL_SCAN_WORK_PER_CALL,
+            Self::Prefix => MAX_PREFIX_SCAN_WORK_PER_CALL,
+        }
+    }
+
+    fn scan_work(self, name: &[u8]) -> usize {
+        match self {
+            Self::Contains => name
+                .len()
+                .saturating_add(1)
+                .saturating_mul(MAX_TEXT_MATCH_BYTES),
+            // `text_scan.starts_with<64>` checks at most 64 needle slots.
+            Self::Prefix => MAX_TEXT_MATCH_BYTES,
+        }
+    }
+}
+
+fn execute_text_matches(
+    cache: &RwLock<Option<Arc<NativeFilterKernel>>>,
+    store: &DocumentStore,
+    kind: TextMatchKind,
+    names: &[Vec<u8>],
+    needle: &[u8],
+) -> Result<NativeTextMatchSummary, String> {
+    let label = kind.label();
+    if names.len() > MAX_TEXT_MATCH_ITEMS {
         return Err(format!(
-            "MNCS-native symbol matching is bounded to {MAX_SYMBOL_MATCH_NAMES} names; received {}",
+            "MNCS-native {label} is bounded to {MAX_TEXT_MATCH_ITEMS} names; received {}",
             names.len()
         ));
     }
-    if needle.len() > MAX_SYMBOL_NAME_BYTES {
+    if needle.len() > MAX_TEXT_MATCH_BYTES {
         return Err(format!(
-            "MNCS-native symbol matching is bounded to {MAX_SYMBOL_NAME_BYTES} needle bytes; received {}",
+            "MNCS-native {label} is bounded to {MAX_TEXT_MATCH_BYTES} needle bytes; received {}",
             needle.len()
         ));
     }
     if let Some((index, name)) = names
         .iter()
         .enumerate()
-        .find(|(_, name)| name.len() > MAX_SYMBOL_NAME_BYTES)
+        .find(|(_, name)| name.len() > MAX_TEXT_MATCH_BYTES)
     {
         return Err(format!(
-            "MNCS-native symbol matching name {index} exceeds {MAX_SYMBOL_NAME_BYTES} bytes: {}",
+            "MNCS-native {label} name {index} exceeds {MAX_TEXT_MATCH_BYTES} bytes: {}",
             name.len()
         ));
     }
     let scan_work = names
         .iter()
-        .map(|name| {
-            name.len()
-                .saturating_add(1)
-                .saturating_mul(MAX_SYMBOL_NAME_BYTES)
-        })
+        .map(|name| kind.scan_work(name))
         .fold(0usize, usize::saturating_add);
-    if scan_work > MAX_SYMBOL_SCAN_WORK_PER_CALL {
+    let max_scan_work = kind.max_scan_work();
+    if scan_work > max_scan_work {
         return Err(format!(
-            "MNCS-native symbol matching exceeds the per-call scan bound: {scan_work} > {MAX_SYMBOL_SCAN_WORK_PER_CALL}"
+            "MNCS-native {label} exceeds the per-call scan bound: {scan_work} > {max_scan_work}"
         ));
     }
     let kernel = kernel(cache, store)?;
@@ -425,13 +487,13 @@ pub(crate) fn execute_symbol_matches(
         schema_version: EXECUTION_REQUEST_SCHEMA_VERSION.to_owned(),
         target: ExecutionTarget {
             module: FILTER_QUERY_MODULE.to_owned(),
-            function: SYMBOL_MATCH_FUNCTION.to_owned(),
+            function: kind.function().to_owned(),
         },
         arguments: vec![
             ExecutionValue::Sequence {
                 values: Arc::new(values),
             },
-            fixed_byte_argument(needle, MAX_SYMBOL_NAME_BYTES),
+            fixed_byte_argument(needle, MAX_TEXT_MATCH_BYTES),
             ExecutionValue::Byte {
                 value: needle.len() as i128,
             },
@@ -448,9 +510,7 @@ pub(crate) fn execute_symbol_matches(
             .failure
             .map(|failure| failure.reason)
             .unwrap_or_else(|| format!("execution status was {:?}", execution.status));
-        return Err(format!(
-            "MNCS-native symbol match execution refused: {reason}"
-        ));
+        return Err(format!("MNCS-native {label} execution refused: {reason}"));
     }
     let ExecutionValue::Record {
         type_identity,
@@ -458,15 +518,15 @@ pub(crate) fn execute_symbol_matches(
         fields,
     } = &execution.returned[0]
     else {
-        return Err("MNCS-native symbol match returned a non-record value".to_owned());
+        return Err(format!("MNCS-native {label} returned a non-record value"));
     };
     let record = kernel
         .program
         .record_types
         .iter()
-        .find(|record| &record.identity == type_identity && record.name == "SymbolMatchResult")
-        .ok_or_else(|| "MNCS-native symbol match returned an unknown record".to_owned())?;
-    if result_name != "SymbolMatchResult"
+        .find(|record| &record.identity == type_identity && record.name == TEXT_MATCH_RESULT_TYPE)
+        .ok_or_else(|| format!("MNCS-native {label} returned an unknown record"))?;
+    if result_name != TEXT_MATCH_RESULT_TYPE
         || record.fields.len() != fields.len()
         || record
             .fields
@@ -474,37 +534,39 @@ pub(crate) fn execute_symbol_matches(
             .zip(fields.iter())
             .any(|(expected, actual)| expected.name != actual.0)
     {
-        return Err("MNCS-native symbol match returned an unexpected record shape".to_owned());
+        return Err(format!(
+            "MNCS-native {label} returned an unexpected record shape"
+        ));
     }
     let field = |name: &str| {
         fields
             .iter()
             .find(|(field_name, _)| field_name == name)
             .map(|(_, value)| value)
-            .ok_or_else(|| format!("MNCS-native symbol match omitted field {name:?}"))
+            .ok_or_else(|| format!("MNCS-native {label} omitted field {name:?}"))
     };
-    let matched = boolean_sequence_result(field("matched")?)?;
+    let matched = boolean_sequence_result(field("matched")?, label)?;
     let count = integer_result(&kernel.program, field("matched_count")?)?;
     let valid = match field("valid")? {
         ExecutionValue::Boolean { value } => *value,
         _ => {
-            return Err("MNCS-native symbol match returned a non-boolean validity flag".to_owned())
+            return Err(format!(
+                "MNCS-native {label} returned a non-boolean validity flag"
+            ))
         }
     };
     let matched_count = usize::try_from(count)
-        .map_err(|_| "MNCS-native symbol match returned an invalid match count".to_owned())?;
+        .map_err(|_| format!("MNCS-native {label} returned an invalid match count"))?;
     let mask_count = matched.iter().filter(|value| **value).count();
     if !valid || matched_count != mask_count || matched_count > names.len() {
-        return Err("MNCS-native symbol match failed result validation".to_owned());
+        return Err(format!("MNCS-native {label} failed result validation"));
     }
     let dependency_source_identity = kernel
         .dependency_identities
         .get(TEXT_SCAN_MODULE)
         .cloned()
-        .ok_or_else(|| {
-            "MNCS-native symbol matcher lost its text-scan dependency identity".to_owned()
-        })?;
-    Ok(NativeSymbolMatchSummary {
+        .ok_or_else(|| format!("MNCS-native {label} lost its text-scan dependency identity"))?;
+    Ok(NativeTextMatchSummary {
         backend: kernel.artifact.backend.name.clone(),
         kernel_source_identity: kernel.source_identity.clone(),
         dependency_source_identity,
@@ -603,19 +665,18 @@ mod tests {
             unicode.kernel_artifact_identity
         );
 
-        let rejected_names = vec![vec![b'a'; MAX_SYMBOL_NAME_BYTES]; MAX_SYMBOL_MATCH_NAMES];
-        let mut long_needle = vec![b'a'; MAX_SYMBOL_NAME_BYTES - 1];
+        let rejected_names = vec![vec![b'a'; MAX_TEXT_MATCH_BYTES]; MAX_TEXT_MATCH_ITEMS];
+        let mut long_needle = vec![b'a'; MAX_TEXT_MATCH_BYTES - 1];
         long_needle.push(b'b');
         let rejected = execute_symbol_matches(&cache, &store, &rejected_names, &long_needle)
             .expect_err("over-budget work envelope is refused before execution");
         assert!(rejected.contains("per-call scan bound"));
 
-        let bounded_worst_case_names = vec![
-            vec![b'a'; MAX_SYMBOL_NAME_BYTES];
-            MAX_SYMBOL_SCAN_WORK_PER_CALL
-                / ((MAX_SYMBOL_NAME_BYTES + 1)
-                    * MAX_SYMBOL_NAME_BYTES)
-        ];
+        let bounded_worst_case_names =
+            vec![
+                vec![b'a'; MAX_TEXT_MATCH_BYTES];
+                MAX_SYMBOL_SCAN_WORK_PER_CALL / ((MAX_TEXT_MATCH_BYTES + 1) * MAX_TEXT_MATCH_BYTES)
+            ];
         let bounded_worst_case =
             execute_symbol_matches(&cache, &store, &bounded_worst_case_names, &long_needle)
                 .expect("maximum admitted name-match envelope");
@@ -631,8 +692,52 @@ mod tests {
     fn native_workspace_name_match_refuses_oversized_values_without_truncation() {
         let cache = RwLock::new(None);
         let store = DocumentStore::new(None);
-        let name = vec![b'x'; MAX_SYMBOL_NAME_BYTES + 1];
+        let name = vec![b'x'; MAX_TEXT_MATCH_BYTES + 1];
         let error = execute_symbol_matches(&cache, &store, &[name], b"x").unwrap_err();
         assert!(error.contains("exceeds 64 bytes"));
+    }
+
+    #[test]
+    fn native_completion_prefix_matches_match_rust_for_utf8_and_empty_prefix() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let library = [
+            manifest_dir.join("../../../mncs-stdlib/library"),
+            manifest_dir.join("../../../../mncs-stdlib/library"),
+            manifest_dir.join("../../../../../mncs-stdlib/library"),
+        ]
+        .into_iter()
+        .find(|path| path.join("core/sequences.mncs").is_file())
+        .expect("sibling MNCS standard library");
+        std::env::set_var("MNCS_LIBRARY_PATH", &library);
+
+        let cache = RwLock::new(None);
+        let store = DocumentStore::new(None);
+        let names = ["return", "record", "café", "cafeteria", "λambda", "x"]
+            .map(|name| name.as_bytes().to_vec());
+        for prefix in ["ret", "caf", "café", "λ", "missing", ""] {
+            let expected: Vec<bool> = names
+                .iter()
+                .map(|name| {
+                    std::str::from_utf8(name)
+                        .expect("test names are UTF-8")
+                        .starts_with(prefix)
+                })
+                .collect();
+            let native = execute_prefix_matches(&cache, &store, &names, prefix.as_bytes())
+                .expect("bounded MNCS completion prefix match");
+            assert_eq!(native.matched.get(..names.len()), Some(expected.as_slice()));
+            assert_eq!(
+                native.matched_count,
+                expected.iter().filter(|matched| **matched).count()
+            );
+            assert!(native.valid);
+            assert_eq!(native.backend, RESEARCH_BYTECODE_BACKEND_NAME);
+            assert_eq!(native.input_count, names.len());
+        }
+
+        let oversized = vec![b'x'; MAX_TEXT_MATCH_BYTES + 1];
+        assert!(execute_prefix_matches(&cache, &store, &[oversized], b"x")
+            .expect_err("oversized labels are never truncated")
+            .contains("exceeds 64 bytes"));
     }
 }
