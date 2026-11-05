@@ -8,18 +8,18 @@ module mncs.language_service.call_relation_summary.v1;
 use mncs.std.sort.v1;
 
 record NeighborSummary {
-    targets: [u64; 48],
+    targets: [u64; 64],
     count: u64
 }
 
-fn compact_unique(sorted: [u64; 48], count: u64) -> (result: NeighborSummary) {
-    let empty: [u64; 48] = [0; 48];
+fn compact_unique(sorted: [u64; 64], count: u64) -> (result: NeighborSummary) {
+    let empty: [u64; 64] = [0; 64];
     let start: NeighborSummary = NeighborSummary { targets: empty, count: 0 };
     iterate i over sorted carrying result: NeighborSummary = start {
         let live: bool = i < count;
         let previous: u64 = select(i > 0, i -% 1, 0);
         let changed: bool = live && (i == 0 || sorted[i] != sorted[previous]);
-        let slot: u64 = select(result.count < 48, result.count, 0);
+        let slot: u64 = select(result.count < 64, result.count, 0);
         let value: u64 = select(changed, sorted[i], result.targets[slot]);
         next result = NeighborSummary {
             targets: replace(result.targets, slot, value),
@@ -29,7 +29,7 @@ fn compact_unique(sorted: [u64; 48], count: u64) -> (result: NeighborSummary) {
     return result;
 }
 
-fn summarize_neighbors(candidates: [u64; 48], count: byte) -> (result: NeighborSummary) {
-    let ordered: [u64; 48] = sort_up(candidates, count as u64);
+fn summarize_neighbors(candidates: [u64; 64], count: byte) -> (result: NeighborSummary) {
+    let ordered: [u64; 64] = sort_up(candidates, count as u64);
     return compact_unique(ordered, count as u64);
 }

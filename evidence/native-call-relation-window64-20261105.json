@@ -1,0 +1,117 @@
+{
+  "schema_version": "mncs.language-service.native-relation-window/1",
+  "recorded_at": "2026-11-05T04:43:37Z",
+  "campaign_id": "cmp_luna_max_native_ecosystem_20261105_0400z",
+  "environment": {
+    "session_id": "ses_ca6832f627558a65",
+    "environment_id": "renv_47741f6d5696249d",
+    "work_intent_id": "int_25a05ecfa8ac408e",
+    "scope_grant_id": "scope_f4fd3c3f34ad97ff",
+    "claim_id": "claim:mncs-language-service:worktree:2e7211df7cf9",
+    "claim_identity": "clm_123c58521ed5d292",
+    "claim_basis": "explicit-adoption",
+    "claim_adoption_reason": "The session created this checkout and made the edits before claiming it; the claim inventory showed no live competing owner.",
+    "repository": "mncs-language-service",
+    "branch": "campaign/luna-max-language-service-sort-window-20261105",
+    "base_revision": "d963e570eb01786d2994b0808c38c573fb611fd4",
+    "checkout_identity": "checkout:38a0b386722f90f0"
+  },
+  "authorities": {
+    "environment_readiness": "degraded with no blockers; selected Language toolchain available",
+    "selected_toolchain_revision": "ce468548ead4c238f8658fa32e6e7f9bcfb2afd9",
+    "service_cargo_language_revision": "4581d510",
+    "language_profile": "0.19",
+    "language_capability_index_identity": "sha256:869f4de01acaec8c911444c0539fa788b934b4b623476d2666d67524538e3191",
+    "compiler_inventory_identity": "sha256:fef48bfba2b784166f578f70125e8c0b3ca8fc654e4f1733f0e53b4103932f04",
+    "stdlib_commit": "c5ec09ecee2c31ac73a17f8a8e9bcb8b69515d55",
+    "stdlib_bundle_identity": "mncs:stdlib-bundle:a68cdd3e738b39647d79fbf139d5456594c9ebf0944190f86e78c560399b5cbc",
+    "stdlib_sort_module": "mncs.std.sort.v1",
+    "stdlib_sort_profile": "0.13",
+    "stdlib_sort_source_identity": "sha256:6cbd9675acde624eaadb1f556c64d7e893d0c096bd9a13d39770e6bb5e9ca322",
+    "commons_architecture_identity": "sha256:daf2d175e30e909f9294ab6267fc7bf946f2129c75fdd92b02ac55d25725d20e",
+    "commons_architecture_validation_identity": "sha256:7b770223575111a296c58f797e5e456b1b3cccb1aacf66bb126eca8d045224d1",
+    "commons_pressure_projection_identity": "sha256:83b587e390dc7737477648d5dd6cf016ab57698d0fb3fa786b3a4d1c8a165f99",
+    "commons_pressure_registry_identity": "sha256:cb2bae1a13ab03fb5d12dd7d43298839ff46df5a775ae2e7a251112d728e50f4",
+    "family_context_authority_states": {
+      "language": "verified",
+      "commons_architecture": "current",
+      "commons_pressures": "current",
+      "repository_manifest_and_verification_inventory": "unavailable",
+      "overall_completeness": "unknown"
+    }
+  },
+  "migration": {
+    "consumer": "LanguageService.dependencies/dependents -> graph_query",
+    "displaced_responsibility": "Rust ordering and duplicate removal for bounded direct-neighbor inputs containing 49 through 64 call-edge records.",
+    "native_implementation": "The resident MNCS call-relation kernel invokes mncs.std.sort.v1 and compacts adjacent duplicate ranks.",
+    "native_window_capacity": 64,
+    "previous_capacity": 48,
+    "step_budget": 100000,
+    "host_responsibilities_retained": [
+      "authoritative compiler call-edge extraction",
+      "identity-to-rank projection and response identity mapping",
+      "compatibility ordering and duplicate removal for requests with more than 64 call-edge records"
+    ],
+    "independent_consumer_expectation": "A 64-edge source fixture contains 63 distinct callees in reverse lexical order plus one duplicate. The consumer returns exactly the 63 expected names once each in lexical order.",
+    "compatibility_expectation": "A 65-edge fixture returns all 64 distinct callee names once each in lexical order through the retained host fallback."
+  },
+  "source": {
+    "adapter": {
+      "path": "crates/service-core/src/native_relation.rs",
+      "sha256": "ba69db4e3aac576765fef6591950a7604c10ce12754b8cc0512d47a436522943"
+    },
+    "native_kernel": {
+      "path": "mncs/call_relation_summary.mncs",
+      "sha256": "9b4d6dc22ad52373473b2c0bbdce5dd6bf880aec36d7384ecb848171e2595e68"
+    },
+    "consumer_contract": {
+      "path": "crates/service-core/tests/integration.rs",
+      "sha256": "b5c8d0c700cf49804b1fccb00b0405636864064ac189225f9ba0a8f957cad134"
+    }
+  },
+  "verification": {
+    "stdlib_cranelift_experiment_identity": "mncs:language:experiment:result:bd1cfcbd38a85391d1c378df926576ba95b89bdf8416d6a8213ac94b51b67f50",
+    "stdlib_sort_window64_case": {
+      "step_budget": 100000,
+      "expected_witness": 30806465,
+      "status": "returned",
+      "expectation_met": true
+    },
+    "stdlib_experiment_formal_status": "UNKNOWN",
+    "stdlib_experiment_unresolved_reasons": [
+      "compilation retained required unresolved obligations"
+    ],
+    "stdlib_integrity_suite": "29 passed excluding one unchanged baseline compatibility expectation; full suite was 29 passed, 1 failed",
+    "stdlib_known_failure": "test_compat.py::test_requires_profile_within_toolchain_floor_via_info_tool hardcodes 0.18 although the committed manifest requires profile 0.19",
+    "service_mncs_validation": "PASS",
+    "cargo_fmt_check": "PASS",
+    "native_summary_tests": {
+      "command": "cargo test --offline -p mncs-service-core native_summary_",
+      "passed": 3,
+      "failed": 0,
+      "includes": [
+        "empty window",
+        "full 64-rank reverse-sorted window under the production 100000-step budget",
+        "exact Stdlib sort dependency identity agreement",
+        "refusal at 65 candidate records"
+      ]
+    },
+    "service_core_integration": {
+      "command": "cargo test --offline -p mncs-service-core --test integration",
+      "passed": 34,
+      "failed": 0,
+      "includes": [
+        "64 call-edge native consumer result with duplicate removal and independent lexical expectation",
+        "65 call-edge compatibility fallback",
+        "dependencies and dependents semantic graph behavior"
+      ]
+    },
+    "cargo_target": "/home/epi13/Documents/Projects/mncs-language-service/target"
+  },
+  "limits": [
+    "The Stdlib Cranelift experiment's aggregate formal status remains UNKNOWN because compiler obligations are unresolved, although each corpus expectation passed.",
+    "Language Service family context reports UNKNOWN overall because its repository manifest and verification inventory are unavailable; language and Commons projections are current.",
+    "Call-graph requests with more than 64 edge records still use the compatibility host ordering path.",
+    "The full Language Service workspace suite and resident provider suite were not run."
+  ]
+}

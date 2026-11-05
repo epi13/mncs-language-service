@@ -20,7 +20,7 @@ use crate::modules::StoreResolver;
 
 pub(crate) const RELATION_MODULE: &str = "mncs.language_service.call_relation_summary.v1";
 pub(crate) const RELATION_FUNCTION: &str = "summarize_neighbors";
-pub(crate) const RELATION_WINDOW_CAPACITY: usize = 48;
+pub(crate) const RELATION_WINDOW_CAPACITY: usize = 64;
 const RELATION_URI: &str = "mncs://language-service/call-relation-summary.mncs";
 const RELATION_SOURCE: &str = include_str!("../../../mncs/call_relation_summary.mncs");
 const STEP_BUDGET: u64 = 100_000;
@@ -308,6 +308,12 @@ mod tests {
 
     fn library() -> std::path::PathBuf {
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        if let Some(root) = std::env::var_os("MNCS_STDLIB_ROOT") {
+            let library = std::path::PathBuf::from(root).join("library");
+            if library.join("std/sort.mncs").is_file() {
+                return library;
+            }
+        }
         [
             manifest_dir.join("../../../mncs-stdlib/library"),
             manifest_dir.join("../../../../mncs-stdlib/library"),
@@ -323,13 +329,20 @@ mod tests {
         std::env::set_var("MNCS_LIBRARY_PATH", library());
         let cache = RwLock::new(None);
         let store = DocumentStore::new(None);
+        let expected_dependency_identity = StoreResolver::new(&store)
+            .resolve("mncs.std.sort.v1")
+            .expect("current Stdlib sort module")
+            .identity;
         let candidates = [7, 2, 7, 5, 2, 1, 5];
         let summary =
             execute_neighbor_summary(&cache, &store, &candidates).expect("native relation summary");
         assert_eq!(summary.targets, vec![1, 2, 5, 7]);
         assert_eq!(summary.backend, RESEARCH_BYTECODE_BACKEND_NAME);
         assert!(!summary.kernel_source_identity.is_empty());
-        assert!(!summary.dependency_source_identity.is_empty());
+        assert_eq!(
+            summary.dependency_source_identity,
+            expected_dependency_identity
+        );
         assert!(!summary.kernel_artifact_identity.is_empty());
     }
 
@@ -362,6 +375,6 @@ mod tests {
         let error =
             execute_neighbor_summary(&cache, &store, &vec![0; RELATION_WINDOW_CAPACITY + 1])
                 .unwrap_err();
-        assert!(error.contains("bounded to 48 targets"));
+        assert!(error.contains("bounded to 64 targets"));
     }
 }
