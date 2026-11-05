@@ -20,7 +20,7 @@ use crate::modules::StoreResolver;
 
 pub(crate) const RELATION_MODULE: &str = "mncs.language_service.call_relation_summary.v1";
 pub(crate) const RELATION_FUNCTION: &str = "summarize_neighbors";
-pub(crate) const RELATION_WINDOW_CAPACITY: usize = 32;
+pub(crate) const RELATION_WINDOW_CAPACITY: usize = 48;
 const RELATION_URI: &str = "mncs://language-service/call-relation-summary.mncs";
 const RELATION_SOURCE: &str = include_str!("../../../mncs/call_relation_summary.mncs");
 const STEP_BUDGET: u64 = 100_000;
@@ -349,7 +349,10 @@ mod tests {
             .collect::<Vec<_>>();
         let summary =
             execute_neighbor_summary(&cache, &store, &candidates).expect("full relation summary");
-        assert_eq!(summary.targets, (0..32).collect::<Vec<u64>>());
+        assert_eq!(
+            summary.targets,
+            (0..RELATION_WINDOW_CAPACITY as u64).collect::<Vec<u64>>()
+        );
     }
 
     #[test]
@@ -359,6 +362,6 @@ mod tests {
         let error =
             execute_neighbor_summary(&cache, &store, &vec![0; RELATION_WINDOW_CAPACITY + 1])
                 .unwrap_err();
-        assert!(error.contains("bounded to 32 targets"));
+        assert!(error.contains("bounded to 48 targets"));
     }
 }

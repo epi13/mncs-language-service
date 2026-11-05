@@ -637,6 +637,58 @@ fn alpha(value: i64) -> (result: i64) { return target(value); }
 }
 
 #[test]
+fn direct_relation_summary_uses_native_kernel_above_the_old_window() {
+    std::env::set_var("MNCS_LIBRARY_PATH", stdlib_library());
+    let svc = service();
+    let uri = fixture_uri(CONTRACTS);
+    let mut source = String::from("mncs 0.3;\n\nmodule examples.relations;\n\n");
+    for index in (0..40).rev() {
+        source.push_str(&format!(
+            "fn target_{index:02}(value: i64) -> (result: i64) {{ return value; }}\n"
+        ));
+    }
+    source.push_str("\nfn caller(value: i64) -> (result: i64) {\n");
+    for index in (0..40).rev() {
+        source.push_str(&format!(
+            "    let result_{index:02}: i64 = target_{index:02}(value);\n"
+        ));
+    }
+    source.push_str("    let duplicate: i64 = target_20(result_20);\n    return duplicate;\n}\n");
+    svc.did_open(&uri, 1, source.clone())
+        .expect("open high-degree relation fixture");
+
+    let caller_offset = source.find("fn caller").expect("caller declaration") + 3;
+    let caller_position =
+        mncs_service_core::PositionMap::new(&source).position_of(&source, caller_offset);
+    let described = svc
+        .describe_position(&uri, caller_position.line, caller_position.character)
+        .expect("describe high-degree caller");
+    let caller_identity = described
+        .subject
+        .expect("caller description")
+        .summary
+        .identity
+        .expect("caller identity");
+
+    let outgoing = svc
+        .dependencies(&uri, &caller_identity)
+        .expect("native high-degree relation summary");
+    assert_eq!(outgoing.status, ResponseStatus::Answered);
+    assert_eq!(outgoing.outgoing.len(), 40);
+    assert_eq!(
+        outgoing
+            .outgoing
+            .iter()
+            .map(|edge| edge.name.as_deref().expect("callee name").to_owned())
+            .collect::<Vec<_>>(),
+        (0..40)
+            .map(|index| format!("target_{index:02}"))
+            .collect::<Vec<_>>(),
+        "41 call edges are sorted and deduplicated by the native bounded kernel"
+    );
+}
+
+#[test]
 fn obligations_preserve_pass_fail_unknown() {
     let svc = service();
     let uri = fixture_uri(CONTRACTS);

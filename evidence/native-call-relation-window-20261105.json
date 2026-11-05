@@ -1,0 +1,83 @@
+{
+  "schema_version": "mncs.language-service.native-relation-window/1",
+  "recorded_at": "2026-11-05T03:38:46Z",
+  "campaign_id": "cmp_luna_max_native_stdlib_extension_20261104_2252z",
+  "environment": {
+    "session_id": "ses_15a1c6ba66104959",
+    "work_intent_id": "int_25a05ecfa8ac408e",
+    "scope_grant_id": "scope_2791c697d4eefa0b",
+    "claim_id": "claim:mncs-language-service:worktree:4708c35a15fb",
+    "repository": "mncs-language-service",
+    "branch": "campaign/luna-max-language-service-neighbor-window-20261105",
+    "base_revision": "f201fd9cc49ece526a6f662773c16a0a33c64888"
+  },
+  "authorities": {
+    "language_profile": "0.19",
+    "language_capability_index_identity": "sha256:869f4de01acaec8c911444c0539fa788b934b4b623476d2666d67524538e3191",
+    "compiler_inventory_identity": "sha256:fef48bfba2b784166f578f70125e8c0b3ca8fc654e4f1733f0e53b4103932f04",
+    "stdlib_sort_module": "mncs.std.sort.v1",
+    "stdlib_sort_source_identity": "sha256:9fb698dbd9c40abe2bb963afd157c27ab0bf04dd1fcfb7656549e31069f0f08e",
+    "stdlib_sort_inventory_identity": "sha256:59553d7a22eb35b36cc2bd658c70ca5cee615ca0f5d166c4cb05ab841749dd0e",
+    "commons_architecture_identity": "sha256:daf2d175e30e909f9294ab6267fc7bf946f2129c75fdd92b02ac55d25725d20e",
+    "commons_architecture_validation_identity": "sha256:7b770223575111a296c58f797e5e456b1b3cccb1aacf66bb126eca8d045224d1",
+    "commons_pressure_projection_identity": "sha256:83b587e390dc7737477648d5dd6cf016ab57698d0fb3fa786b3a4d1c8a165f99",
+    "commons_pressure_registry_identity": "sha256:cb2bae1a13ab03fb5d12dd7d43298839ff46df5a775ae2e7a251112d728e50f4",
+    "family_context_authority_states": {
+      "language": "verified",
+      "commons_architecture": "current",
+      "commons_pressures": "current",
+      "repository_manifest_and_verification_inventory": "unavailable",
+      "overall_completeness": "unknown"
+    }
+  },
+  "migration": {
+    "consumer": "LanguageService.dependencies/dependents -> graph_query",
+    "displaced_responsibility": "Rust sorting and duplicate removal for bounded direct-neighbor lists with 33 through 48 call-edge records.",
+    "native_implementation": "mncs/call_relation_summary.mncs executes mncs.std.sort.v1 and compacts adjacent duplicates.",
+    "native_window_capacity": 48,
+    "previous_capacity": 32,
+    "step_budget": 100000,
+    "host_responsibilities_retained": [
+      "authoritative compiler call-edge extraction",
+      "identity-to-rank projection and response identity mapping",
+      "compatibility sorting and deduplication when a request has more than 48 call-edge records"
+    ],
+    "independent_expectation": "A 41-edge source fixture contains 40 distinct callees in reverse lexical order plus one duplicate. The consumer response must contain exactly the 40 expected callee names once each in lexical order."
+  },
+  "resource_bound_experiment": {
+    "64_slot_window": "FAILED: native execution exhausted the 100000-step budget, including for an empty input because the fixed insertion-sort envelope is traversed.",
+    "decision": "Kept the established execution budget and selected a 48-slot envelope; the full reverse-sorted 48-element window passes."
+  },
+  "verification": {
+    "cargo_fmt_check": "PASS",
+    "git_diff_check": "PASS",
+    "native_summary_tests": {
+      "command": "cargo test --offline -p mncs-service-core native_summary_",
+      "result": "PASS",
+      "passed": 3,
+      "failed": 0,
+      "coverage": [
+        "ordering and duplicate removal",
+        "empty and full 48-element reverse-sorted window",
+        "refusal above the fixed window"
+      ]
+    },
+    "service_core_integration": {
+      "command": "cargo test --offline -p mncs-service-core --test integration",
+      "result": "PASS",
+      "passed": 33,
+      "failed": 0,
+      "includes": [
+        "41-edge high-degree consumer fixture",
+        "existing direct relation ordering/deduplication fixture",
+        "dependencies and dependents semantic graph behavior"
+      ]
+    },
+    "cargo_target": "/home/epi13/Documents/Projects/mncs-language-service/target"
+  },
+  "limitations": [
+    "Call-graph requests over 48 call-edge records still use the compatibility host sort/dedup path.",
+    "The native proof covers the Language Service consumer and focused service-core integration suite; the full workspace suite and resident provider suite were not run.",
+    "The repository manifest and verification-obligation inventory were unavailable in the bounded family-context response, so overall family completeness remains UNKNOWN."
+  ]
+}
