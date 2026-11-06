@@ -273,6 +273,171 @@ pub const MAX_TRANSITIVE_DEPTH: usize = 16;
 /// Upper bound on transitive-walk nodes returned in one response.
 pub const MAX_TRANSITIVE_NODES: usize = 1024;
 
+/// Domain identities stay at the service boundary, while the reusable MNCS
+/// walk kernel owns first-visit admission and the breadth-first frontier.
+/// Numeric codes are assigned only to identities as they are encountered.
+struct NativeRelationWalk<K: Ord + Clone> {
+    state: crate::native_relation::NativeWalkState,
+    root: K,
+    code_by_identity: BTreeMap<K, u64>,
+    identity_by_code: Vec<K>,
+}
+
+struct WalkAdmission<T> {
+    accepted: Vec<T>,
+    stopped: bool,
+    had_candidates: bool,
+}
+
+impl<K: Ord + Clone> NativeRelationWalk<K> {
+    fn start(
+        cache: &RwLock<Option<Arc<crate::native_relation::RelationKernel>>>,
+        store: &DocumentStore,
+        root: K,
+    ) -> Result<Self, ServiceError> {
+        let state = crate::native_relation::execute_walk_start(cache, store)
+            .map_err(|reason| ServiceError::InvalidRequest { reason })?;
+        Ok(Self {
+            state,
+            root,
+            code_by_identity: BTreeMap::new(),
+            identity_by_code: Vec::new(),
+        })
+    }
+
+    fn current_frontier(&self) -> Result<Vec<K>, ServiceError> {
+        self.state
+            .frontier
+            .iter()
+            .map(|code| {
+                if *code == crate::native_relation::RELATION_WALK_ROOT_CODE {
+                    return Ok(self.root.clone());
+                }
+                self.identity_by_code
+                    .get(*code as usize)
+                    .cloned()
+                    .ok_or_else(|| ServiceError::InvalidRequest {
+                        reason: format!(
+                            "MNCS-native relation walk returned unknown node code {code}"
+                        ),
+                    })
+            })
+            .collect()
+    }
+
+    fn flush<T>(
+        &mut self,
+        cache: &RwLock<Option<Arc<crate::native_relation::RelationKernel>>>,
+        store: &DocumentStore,
+        depth: usize,
+        codes: &mut Vec<u64>,
+        payloads: &mut Vec<T>,
+        accepted_payloads: &mut Vec<T>,
+    ) -> Result<(), ServiceError> {
+        if codes.is_empty() {
+            return Ok(());
+        }
+        let step = crate::native_relation::execute_walk_advance_batch(
+            cache,
+            store,
+            &self.state,
+            codes,
+            depth,
+            MAX_TRANSITIVE_NODES,
+        )
+        .map_err(|reason| ServiceError::InvalidRequest { reason })?;
+        self.state = step.state;
+        accepted_payloads.extend(
+            std::mem::take(payloads)
+                .into_iter()
+                .zip(step.accepted)
+                .filter_map(|(payload, accepted)| accepted.then_some(payload)),
+        );
+        codes.clear();
+        Ok(())
+    }
+
+    /// Stream candidate identities through fixed-size native batches. The
+    /// payload is retained only for first visits accepted by MNCS.
+    fn admit<T, I>(
+        &mut self,
+        cache: &RwLock<Option<Arc<crate::native_relation::RelationKernel>>>,
+        store: &DocumentStore,
+        depth: usize,
+        candidates: I,
+    ) -> Result<WalkAdmission<T>, ServiceError>
+    where
+        I: IntoIterator<Item = (K, T)>,
+    {
+        let mut codes = Vec::with_capacity(crate::native_relation::RELATION_WALK_BATCH_CAPACITY);
+        let mut payloads = Vec::with_capacity(crate::native_relation::RELATION_WALK_BATCH_CAPACITY);
+        let mut accepted = Vec::new();
+        let mut stopped = false;
+        let mut had_candidates = false;
+
+        for (identity, payload) in candidates {
+            had_candidates = true;
+            let code = if identity == self.root {
+                crate::native_relation::RELATION_WALK_ROOT_CODE
+            } else if let Some(code) = self.code_by_identity.get(&identity) {
+                *code
+            } else if self.identity_by_code.len()
+                < crate::native_relation::RELATION_WALK_RESULT_CAPACITY
+            {
+                let code = self.identity_by_code.len() as u64;
+                self.identity_by_code.push(identity.clone());
+                self.code_by_identity.insert(identity, code);
+                code
+            } else {
+                self.flush(
+                    cache,
+                    store,
+                    depth,
+                    &mut codes,
+                    &mut payloads,
+                    &mut accepted,
+                )?;
+                stopped = true;
+                break;
+            };
+
+            codes.push(code);
+            payloads.push(payload);
+            if codes.len() == crate::native_relation::RELATION_WALK_BATCH_CAPACITY {
+                self.flush(
+                    cache,
+                    store,
+                    depth,
+                    &mut codes,
+                    &mut payloads,
+                    &mut accepted,
+                )?;
+                if self.state.truncated {
+                    stopped = true;
+                    break;
+                }
+            }
+        }
+
+        if !stopped && !codes.is_empty() {
+            self.flush(
+                cache,
+                store,
+                depth,
+                &mut codes,
+                &mut payloads,
+                &mut accepted,
+            )?;
+            stopped = self.state.truncated;
+        }
+        Ok(WalkAdmission {
+            accepted,
+            stopped,
+            had_candidates,
+        })
+    }
+}
+
 /// One module reached by a transitive module-dependency walk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransitiveDepNode {
@@ -2466,51 +2631,53 @@ impl LanguageService {
         let _ = self.snapshot(uri)?;
         let _ = self.ensure_workspace_entries();
         let index = self.workspace_index.read().map_err(poisoned)?;
-        let mut visited: BTreeSet<String> = BTreeSet::from([uri.to_owned()]);
-        let mut frontier = vec![uri.to_owned()];
+        let mut walk =
+            NativeRelationWalk::start(&self.relation_kernel, &self.store, uri.to_owned())?;
         let mut nodes = Vec::new();
         let mut complete = true;
         for depth in 1..=max_depth {
-            let mut next = Vec::new();
-            for current in &frontier {
-                for importer in index.importers_of(current) {
-                    // Skip edges orphaned by a module move: the recorded
-                    // module must still resolve to the walked URI.
-                    let edge = index.entry(&importer).and_then(|entry| {
-                        entry.deps.iter().find(|edge| {
-                            &edge.uri == current
-                                && self.store.module_uri(&edge.module).as_deref() == Some(current)
-                        })
-                    });
-                    let Some(edge) = edge else {
-                        continue;
-                    };
-                    if !visited.insert(importer.clone()) {
-                        continue;
-                    }
-                    nodes.push(TransitiveDepNode {
-                        uri: importer.clone(),
-                        module: index
-                            .entry(&importer)
-                            .map(|entry| entry.module.clone())
-                            .unwrap_or_default(),
-                        depth,
-                        via_module: Some(edge.module.clone()),
-                    });
-                    if nodes.len() >= MAX_TRANSITIVE_NODES {
-                        complete = false;
-                        break;
-                    }
-                    next.push(importer);
-                }
-                if !complete {
-                    break;
-                }
-            }
-            if !complete || next.is_empty() {
+            let frontier = walk.current_frontier()?;
+            if frontier.is_empty() {
                 break;
             }
-            frontier = next;
+            let workspace = &*index;
+            let store = &self.store;
+            let candidates = frontier.into_iter().flat_map(|current| {
+                workspace
+                    .importers_of(&current)
+                    .into_iter()
+                    .filter_map(move |importer| {
+                        // Skip edges orphaned by a module move: the recorded
+                        // module must still resolve to the walked URI.
+                        let edge = workspace.entry(&importer).and_then(|entry| {
+                            entry.deps.iter().find(|edge| {
+                                edge.uri == current
+                                    && store.module_uri(&edge.module).as_deref()
+                                        == Some(current.as_str())
+                            })
+                        });
+                        let edge = edge?;
+                        let node = TransitiveDepNode {
+                            uri: importer.clone(),
+                            module: workspace
+                                .entry(&importer)
+                                .map(|entry| entry.module.clone())
+                                .unwrap_or_default(),
+                            depth,
+                            via_module: Some(edge.module.clone()),
+                        };
+                        Some((importer, node))
+                    })
+            });
+            let admission = walk.admit(&self.relation_kernel, &self.store, depth, candidates)?;
+            nodes.extend(admission.accepted);
+            if admission.stopped {
+                complete = false;
+                break;
+            }
+            if !admission.had_candidates || walk.state.frontier.is_empty() {
+                break;
+            }
         }
         nodes.sort_by(|left, right| (left.depth, &left.uri).cmp(&(right.depth, &right.uri)));
         Ok(TransitiveDepsResponse {
@@ -2534,54 +2701,57 @@ impl LanguageService {
         let _ = self.snapshot(uri)?;
         let _ = self.ensure_workspace_entries();
         let index = self.workspace_index.read().map_err(poisoned)?;
-        let mut visited: BTreeSet<String> = BTreeSet::from([uri.to_owned()]);
-        let mut frontier = vec![uri.to_owned()];
+        let mut walk =
+            NativeRelationWalk::start(&self.relation_kernel, &self.store, uri.to_owned())?;
         let mut nodes = Vec::new();
         let mut complete = true;
         for depth in 1..=max_depth {
-            let mut next = Vec::new();
-            for current in &frontier {
-                let Some(entry) = index.entry(current) else {
-                    continue;
-                };
-                for edge in &entry.deps {
-                    // Follow live resolution so a moved module is reported
-                    // at its current owner. External files have no live
-                    // resolution and keep their recorded URI.
-                    let target = if self.store.knows(&edge.uri) {
-                        self.store
-                            .module_uri(&edge.module)
-                            .unwrap_or_else(|| edge.uri.clone())
-                    } else {
-                        edge.uri.clone()
-                    };
-                    if !visited.insert(target.clone()) {
-                        continue;
-                    }
-                    nodes.push(TransitiveDepNode {
-                        uri: target.clone(),
-                        module: index
-                            .entry(&target)
-                            .map(|entry| entry.module.clone())
-                            .filter(|module| !module.is_empty())
-                            .unwrap_or_else(|| edge.module.clone()),
-                        depth,
-                        via_module: Some(edge.module.clone()),
-                    });
-                    if nodes.len() >= MAX_TRANSITIVE_NODES {
-                        complete = false;
-                        break;
-                    }
-                    next.push(target);
-                }
-                if !complete {
-                    break;
-                }
-            }
-            if !complete || next.is_empty() {
+            let frontier = walk.current_frontier()?;
+            if frontier.is_empty() {
                 break;
             }
-            frontier = next;
+            let workspace = &*index;
+            let store = &self.store;
+            let candidates = frontier
+                .into_iter()
+                .filter_map(|current| {
+                    let Some(entry) = workspace.entry(&current) else {
+                        return None;
+                    };
+                    Some(entry.deps.iter().map(move |edge| {
+                        // Follow live resolution so a moved module is reported
+                        // at its current owner. External files have no live
+                        // resolution and keep their recorded URI.
+                        let target = if store.knows(&edge.uri) {
+                            store
+                                .module_uri(&edge.module)
+                                .unwrap_or_else(|| edge.uri.clone())
+                        } else {
+                            edge.uri.clone()
+                        };
+                        let node = TransitiveDepNode {
+                            uri: target.clone(),
+                            module: workspace
+                                .entry(&target)
+                                .map(|entry| entry.module.clone())
+                                .filter(|module| !module.is_empty())
+                                .unwrap_or_else(|| edge.module.clone()),
+                            depth,
+                            via_module: Some(edge.module.clone()),
+                        };
+                        (target, node)
+                    }))
+                })
+                .flatten();
+            let admission = walk.admit(&self.relation_kernel, &self.store, depth, candidates)?;
+            nodes.extend(admission.accepted);
+            if admission.stopped {
+                complete = false;
+                break;
+            }
+            if !admission.had_candidates || walk.state.frontier.is_empty() {
+                break;
+            }
         }
         nodes.sort_by(|left, right| (left.depth, &left.uri).cmp(&(right.depth, &right.uri)));
         Ok(TransitiveDepsResponse {
@@ -2632,52 +2802,52 @@ impl LanguageService {
         // Expand by (uri, symbol) so callers without a recorded identity
         // still contribute their own callers to deeper levels.
         let root = (root_uri, root_idx);
-        let mut visited: BTreeSet<(String, usize)> = BTreeSet::from([root.clone()]);
-        let mut expand = vec![root];
+        let mut walk = NativeRelationWalk::start(&self.relation_kernel, &self.store, root)?;
         let mut nodes = Vec::new();
         let mut complete = true;
         for depth in 1..=max_depth {
-            let mut next = Vec::new();
-            for (uri, idx) in &expand {
-                let Some(entry) = index.entry(uri) else {
-                    continue;
-                };
-                let Some(span) = entry.spans.get(*idx).copied() else {
-                    continue;
-                };
-                for occurrence in index.occurrences_for_declaration(span, SymbolKind::Function) {
-                    let Some(caller) = occurrence.enclosing_function else {
-                        continue;
-                    };
-                    let key = (occurrence.uri.clone(), caller);
-                    if !visited.insert(key.clone()) {
-                        continue;
-                    }
-                    let summary = index
-                        .entry(&occurrence.uri)
-                        .and_then(|entry| entry.symbols.get(caller));
-                    nodes.push(TransitiveCallerNode {
-                        identity: summary.and_then(|summary| summary.identity.clone()),
-                        uri: occurrence.uri.clone(),
-                        name: summary
-                            .map(|summary| summary.name.clone())
-                            .unwrap_or_default(),
-                        depth,
-                    });
-                    if nodes.len() >= MAX_TRANSITIVE_NODES {
-                        complete = false;
-                        break;
-                    }
-                    next.push(key);
-                }
-                if !complete {
-                    break;
-                }
-            }
-            if !complete || next.is_empty() {
+            let frontier = walk.current_frontier()?;
+            if frontier.is_empty() {
                 break;
             }
-            expand = next;
+            let workspace = &*index;
+            let candidates = frontier
+                .into_iter()
+                .filter_map(|(uri, idx)| {
+                    let entry = workspace.entry(&uri)?;
+                    let span = entry.spans.get(idx).copied()?;
+                    Some(
+                        workspace
+                            .occurrences_for_declaration(span, SymbolKind::Function)
+                            .into_iter()
+                            .filter_map(move |occurrence| {
+                                let caller = occurrence.enclosing_function?;
+                                let key = (occurrence.uri.clone(), caller);
+                                let summary = workspace
+                                    .entry(&occurrence.uri)
+                                    .and_then(|entry| entry.symbols.get(caller));
+                                let node = TransitiveCallerNode {
+                                    identity: summary.and_then(|summary| summary.identity.clone()),
+                                    uri: occurrence.uri.clone(),
+                                    name: summary
+                                        .map(|summary| summary.name.clone())
+                                        .unwrap_or_default(),
+                                    depth,
+                                };
+                                Some((key, node))
+                            }),
+                    )
+                })
+                .flatten();
+            let admission = walk.admit(&self.relation_kernel, &self.store, depth, candidates)?;
+            nodes.extend(admission.accepted);
+            if admission.stopped {
+                complete = false;
+                break;
+            }
+            if !admission.had_candidates || walk.state.frontier.is_empty() {
+                break;
+            }
         }
         nodes.sort_by(|left, right| {
             (left.depth, &left.uri, &left.name).cmp(&(right.depth, &right.uri, &right.name))

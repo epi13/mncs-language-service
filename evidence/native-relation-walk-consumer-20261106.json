@@ -1,0 +1,75 @@
+{
+  "schema_version": "mncs.native-consumption-evidence/1",
+  "campaign_id": "cmp_luna_native_ecosystem_20261106_0856z",
+  "session_id": "ses_a70adf4415c16163",
+  "work_intent_id": "int_25a05ecfa8ac408e",
+  "repository": "mncs-language-service",
+  "branch": "campaign/luna-max-language-service-native-relation-walk-20261106",
+  "checkout_identity": "checkout:676e527499a631ca",
+  "migration": {
+    "consumers": [
+      "LanguageService::transitive_dependents",
+      "LanguageService::transitive_dependencies",
+      "LanguageService::transitive_callers"
+    ],
+    "shared_native_module": "mncs.std.relation_walk.v1",
+    "shared_module_source_content_sha256": "48ead4d4866a49bdfce74f2b613b7361d395284aeee65bd22e4771b640d3ac7b",
+    "shared_bundle_identity": "mncs:stdlib-bundle:4f6ee16b488006297ec7f6eea4fff2657f9b222266e90d26cb4d8685122f978b",
+    "service_kernel_source_path": "mncs/call_relation_summary.mncs",
+    "service_kernel_source_sha256": "ea4c24492693e3ec9cabadb60d49e27e2be3cbefea7754940719ee9f929c0c3a",
+    "service_adapter_source_sha256": "693f70f14864465c2310985415c4fb20dbc6ae0ffdf3a0d24cfe9a88000107cd",
+    "query_source_sha256": "a20e5b81f2d8516a51c81a5f6bffe66f8707c90f91130f0cb2ba95abda8b3ae2",
+    "native_responsibilities": [
+      "first-visit admission and duplicate suppression",
+      "cycle suppression including the root",
+      "breadth-first frontier accumulation across all parents at a depth",
+      "1024-result capacity and truncation state"
+    ],
+    "service_responsibilities_retained": [
+      "module URI resolution and moved-module handling",
+      "authoritative import and caller-edge discovery",
+      "domain identity interning at the numeric-kernel boundary",
+      "protocol result construction and established output sorting"
+    ],
+    "batch_capacity": 64,
+    "result_capacity": 1024,
+    "depth_capacity": 16
+  },
+  "verification": [
+    {
+      "command": "cargo test -p mncs-service-core native_relation::tests::native_walk_owns_first_visit_admission_and_depth_frontiers -- --nocapture",
+      "status": "PASS",
+      "result": "1 passed in 12.22s; exercised root sentinel integrity, duplicate/cycle admission, same-depth frontier accumulation, depth reset, provenance identity, and explicit result-budget truncation"
+    },
+    {
+      "command": "MNCS_STDLIB_ROOT=/home/epi13/Documents/Projects/mncs-stdlib/.worktrees/luna-max-stdlib-graph-closure-20261106 MNCS_LIBRARY_PATH=/home/epi13/Documents/Projects/mncs-stdlib/.worktrees/luna-max-stdlib-graph-closure-20261106/library cargo test -p mncs-service-core --test workspace_index transitive_walks_report_depths_and_stay_complete -- --nocapture",
+      "status": "PASS",
+      "result": "1 passed in 19.57s; independent expectations covered all three production query consumers, depth levels, root exclusion, and completeness"
+    },
+    {
+      "command": "MNCS_STDLIB_ROOT=/home/epi13/Documents/Projects/mncs-stdlib MNCS_LIBRARY_PATH=/home/epi13/Documents/Projects/mncs-stdlib/library cargo test -p mncs-service-core --test workspace_index transitive_walks_report_depths_and_stay_complete -- --nocapture",
+      "status": "PASS",
+      "result": "1 passed in 19.62s against the published Stdlib main checkout after relation-walk commit 7f9bfcb"
+    },
+    {
+      "command": "MNCS_BIN=<language-release-binary> MNCS_LIBRARY_PATH=<campaign-library> python3 -m pytest -q tests/test_toolchain.py::test_relation_walk_contract_executes_on_cranelift",
+      "status": "PASS",
+      "result": "1 passed in 3.21s"
+    },
+    {
+      "command": "MNCS_BIN=<language-release-binary> MNCS_LIBRARY_PATH=<campaign-library> python3 -m pytest -q",
+      "status": "PASS",
+      "result": "35 passed in 105.20s"
+    },
+    {
+      "command": "cargo test -p mncs-service-core --test workspace_index",
+      "status": "INTERRUPTED",
+      "result": "The broad test binary had reported three passing tests when the run was stopped after live process inspection showed 759% aggregate CPU at 27s. It has no final suite verdict.",
+      "follow_up": "Candidate processing was changed to retain 64-item batches across the complete BFS layer rather than flushing once per parent. The focused transitive-walk consumer contract passed after this change; the interrupted broad suite was not rerun."
+    }
+  ],
+  "status": "focused-consumer-verification-passed",
+  "limitations": [
+    "The full Language Service test suite was not completed. The broad workspace-index suite remains unverified as a whole."
+  ]
+}

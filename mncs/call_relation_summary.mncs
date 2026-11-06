@@ -6,6 +6,7 @@ mncs 0.13;
 module mncs.language_service.call_relation_summary.v1;
 
 use mncs.std.sort.v1;
+use mncs.std.relation_walk.v1;
 
 record NeighborSummary {
     targets: [u64; 64],
@@ -32,4 +33,20 @@ fn compact_unique(sorted: [u64; 64], count: u64) -> (result: NeighborSummary) {
 fn summarize_neighbors(candidates: [u64; 64], count: byte) -> (result: NeighborSummary) {
     let ordered: [u64; 64] = sort_up(candidates, count as u64);
     return compact_unique(ordered, count as u64);
+}
+
+// Thin typed exports keep the service adapter bound to this local kernel
+// artifact while the reusable visit/frontier transitions remain in Stdlib.
+fn start_relation_walk(root: u64) -> (result: WalkState) {
+    return walk_start(root);
+}
+
+fn advance_relation_walk(
+    state: WalkState,
+    candidates: [u64; 64],
+    count: u64,
+    depth: u64,
+    max_nodes: u64
+) -> (result: AdvanceOut) {
+    return walk_advance(state, candidates, count, depth, max_nodes);
 }
