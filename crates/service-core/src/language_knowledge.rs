@@ -232,7 +232,11 @@ pub fn discover(root: Option<&Path>) -> Result<(PathBuf, LanguageCapabilityIndex
     if let Ok(current) = env::current_dir() {
         candidates.push(current.join("docs/language-capabilities.json"));
         let mut ancestor = current.parent();
-        for _ in 0..4 {
+        // Test binaries may run with `crates/<package>` as their current
+        // directory. A linked checkout adds `.worktrees/<checkout>` above
+        // the repository root, so retain enough bounded ancestry to find a
+        // sibling `mncs-language` checkout in either layout.
+        for _ in 0..6 {
             let Some(path) = ancestor else { break };
             candidates.push(path.join("mncs-language/docs/language-capabilities.json"));
             ancestor = path.parent();

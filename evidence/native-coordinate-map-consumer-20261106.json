@@ -1,0 +1,92 @@
+{
+  "schema_version": "mncs.native-consumption-evidence/1",
+  "campaign_id": "cmp_luna_native_rights_actions_20261106_1948z",
+  "session_id": "ses_bdf73a9b5ee30101",
+  "work_intent_id": "int_25a05ecfa8ac408e",
+  "claim_identity": "clm_32cc6bd7f471279e",
+  "repository": "mncs-language-service",
+  "branch": "campaign/luna-native-lsp-position-map-20261106",
+  "base_revision": "1f3b87bf9050c0aa219d1184a11a33da0063d31f",
+  "migration": {
+    "consumer": "PositionMap::position_of and PositionMap::offset_of",
+    "downstream_callers": [
+      "render.rs",
+      "edits.rs",
+      "rename.rs",
+      "intel.rs",
+      "queries.rs",
+      "format.rs",
+      "analysis.rs",
+      "actions.rs"
+    ],
+    "shared_stdlib_module": "mncs.std.utf8_scalar.v1",
+    "stdlib_revision": "7f1d3bae9ab676c45b73811cdb2e5827658c69ff",
+    "stdlib_source_path": "library/std/utf8_scalar.mncs",
+    "stdlib_source_sha256": "43821c9e71cd5ac64d49baed55501ceacbfe4290c54bf3068f23474c4abae28c",
+    "native_module_source_path": "mncs/coordinate_map.mncs",
+    "native_module_source_sha256": "83a1bd1a108c5f114c91c6e4836f6dd31995ecb493d2afe80704d8414e98c94c",
+    "adapter_source_path": "crates/service-core/src/native_coords.rs",
+    "adapter_source_sha256": "47c331d36bb2ad1398a6edefa3e9a8c71049078583ccf43b25be25a162e7b9ae",
+    "consumer_source_sha256": "b88151568f3caffbc86e3f47d48b6d9f665e51bf24721a688faaba971fe6a98c",
+    "host_responsibilities_retired_from_production": [
+      "UTF-8 scalar iteration in byte-to-UTF-16 position conversion",
+      "Rust char::len_utf16 accumulation in both coordinate directions"
+    ],
+    "native_responsibilities": [
+      "decode bounded UTF-8 chunks through the shared Stdlib scalar kernel",
+      "count UTF-16 units and produce 64-byte checkpoints",
+      "map individual byte offsets to scalar-boundary snaps in bounded windows",
+      "convert UTF-16 columns back to byte boundaries including surrogate-pair interiors"
+    ],
+    "service_responsibilities_retained": [
+      "LF line indexing and CRLF policy",
+      "LSP clamping and source-span projection",
+      "ASCII identity fast path",
+      "lazy per-line and per-window cache ownership"
+    ],
+    "runtime": {
+      "compile_api": "ReferenceCompiler",
+      "backend": "mncs-research-bytecode",
+      "execution_api": "mncs_codegen::execute_backend",
+      "program_compile_cache": "OnceLock per process",
+      "chunk_progress_limit_bytes": 1020,
+      "chunk_lookahead_bytes": 3,
+      "checkpoint_stride_bytes": 64,
+      "window_input_limit_bytes": 70,
+      "indexing_policy": "only queried lines are indexed; exact windows are cached on demand"
+    }
+  },
+  "tooling_correction": {
+    "path": "crates/service-core/src/language_knowledge.rs",
+    "behavior": "extended the bounded current-directory ancestor search from four to six levels so package tests inside linked worktrees find the sibling mncs-language index without MNCS_LANGUAGE_ROOT",
+    "contract": "family_agent_context_is_bounded_and_identity_bound"
+  },
+  "verification": [
+    {
+      "command": "MNCS_LIBRARY_PATH=/home/epi13/Documents/Projects/mncs-stdlib/library CARGO_TARGET_DIR=/home/epi13/Documents/Projects/mncs-language-service/target cargo test -p mncs-service-core coords::tests --lib -- --nocapture",
+      "status": "PASS",
+      "result": "8 passed; independent Rust character-based expectations covered ASCII, Unicode, CRLF, clamping, scalar boundaries, long mixed-encoding lines across chunk boundaries, and artifact identity presence"
+    },
+    {
+      "command": "env -u MNCS_LANGUAGE_ROOT MNCS_STDLIB_ROOT=/home/epi13/Documents/Projects/mncs-stdlib MNCS_LIBRARY_PATH=/home/epi13/Documents/Projects/mncs-stdlib/library CARGO_TARGET_DIR=/home/epi13/Documents/Projects/mncs-language-service/target cargo test -p mncs-lsp -p mncs-mcp",
+      "status": "PASS",
+      "result": "24 passed across LSP protocol/transcript, MCP protocol, and minimal transport tests; the linked-worktree family-context contract passed with MNCS_LANGUAGE_ROOT unset"
+    },
+    {
+      "command": "git diff --check && cargo fmt --all -- --check",
+      "status": "PASS",
+      "result": "no whitespace errors; formatting is current"
+    },
+    {
+      "command": "Environment capability mncs-language-service:test/language-service-tests (cargo test --workspace)",
+      "status": "INCOMPLETE",
+      "result": "Environment execution timed out at 300 seconds while the service-core unit binary remained CPU-bound; the test binary was interrupted and exited without a workspace verdict",
+      "follow_up": "Focused coordinate tests and both protocol packages passed; the full workspace suite was not repeated"
+    }
+  ],
+  "status": "focused-native-consumer-verification-passed",
+  "limitations": [
+    "The full Language Service workspace suite has no final verdict.",
+    "No standalone resident-memory benchmark was collected; resource bounds are enforced by fixed input, chunk, and window limits plus lazy caching."
+  ]
+}

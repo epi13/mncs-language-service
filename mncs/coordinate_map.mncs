@@ -1,0 +1,158 @@
+mncs 0.13;
+
+// LSP coordinate primitives for Language Service. UTF-8 scalar decoding is
+// shared with Stdlib. Long lines are summarized into native byte/UTF-16
+// checkpoints; exact mappings are materialized for a small window on demand.
+module mncs.language_service.coordinate_map.v1;
+
+use mncs.std.utf8_scalar.v1 as utf8_scalar;
+
+record CoordinateChunk {
+    bytes: u64,
+    units: u64,
+    valid: bool,
+    map: [u32; 17],
+    map_length: u64
+}
+
+record CoordinateWindow {
+    valid: bool,
+    map: [u16; 71],
+    map_length: u64
+}
+
+record ScanState {
+    bytes: u64,
+    units: u64,
+    last_bytes: u64,
+    last_units: u64,
+    consumed_bytes: u64,
+    consumed_units: u64,
+    failed: bool,
+    valid: bool,
+    map: [u32; 17]
+}
+
+record WindowState {
+    bytes: u64,
+    units: u64,
+    last_bytes: u64,
+    last_units: u64,
+    failed: bool,
+    valid: bool,
+    map: [u16; 71]
+}
+
+fn scalar_width(scalar: u32) -> (result: u64) {
+    return select((scalar as u64) > 65535, 2, 1);
+}
+
+// Scan one 1020-byte progress chunk plus UTF-8 lookahead. Checkpoints occur
+// every 64 bytes and store (UTF-16 units * 2048 + snapped byte offset).
+fn position_chunk(
+    view: [byte; up_to 1023],
+    view_length: u64,
+    target: u64
+) -> (result: CoordinateChunk) {
+    let window: u64 = select(view_length <= view.len, view_length, view.len);
+    let bounded_target: u64 = select(target <= 1020, target, 1020);
+    let limit: u64 = select(bounded_target <= window, bounded_target, window);
+    let empty_map: [u32; 17] = [0; 17];
+    iterate i over view carrying state: ScanState = ScanState {
+        bytes: 0,
+        units: 0,
+        last_bytes: 0,
+        last_units: 0,
+        consumed_bytes: 0,
+        consumed_units: 0,
+        failed: false,
+        valid: true,
+        map: empty_map
+    } {
+        let at_boundary: bool = i == state.bytes;
+        let active: bool = !state.failed && at_boundary && state.bytes < window;
+        let scalar: utf8_scalar.ScalarStep = utf8_scalar.step_scalar_generic(view, window, state.bytes);
+        let invalid: bool = active && !scalar.valid;
+        let consumed: bool = active && scalar.valid;
+        let next_bytes: u64 = select(consumed, scalar.next, state.bytes);
+        let width: u64 = select(consumed, scalar_width(scalar.scalar), 0);
+        let next_units: u64 = state.units + width;
+        let mapped_bytes: u64 = select(at_boundary, state.bytes, state.last_bytes);
+        let mapped_units: u64 = select(at_boundary, state.units, state.last_units);
+        let packed: u32 = (mapped_units * 2048 + mapped_bytes) as u32;
+        let slot: u64 = i / 64;
+        let checkpoint: bool = i % 64 == 0;
+        let saved: u32 = select(checkpoint, packed, state.map[slot]);
+        let updated_map: [u32; 17] = replace(state.map, slot, saved);
+        let within_target: bool = consumed && scalar.next <= limit;
+        next state = ScanState {
+            bytes: next_bytes,
+            units: select(consumed, next_units, state.units),
+            last_bytes: select(consumed, state.bytes, state.last_bytes),
+            last_units: select(consumed, state.units, state.last_units),
+            consumed_bytes: select(within_target, scalar.next, state.consumed_bytes),
+            consumed_units: select(within_target, next_units, state.consumed_units),
+            failed: state.failed || invalid,
+            valid: state.valid && !invalid,
+            map: updated_map
+        };
+    }
+    let end_slot: u64 = (window + 63) / 64;
+    let packed_end: u32 = (state.units * 2048 + state.bytes) as u32;
+    let completed_map: [u32; 17] = replace(state.map, end_slot, packed_end);
+    return CoordinateChunk {
+        bytes: state.consumed_bytes,
+        units: state.consumed_units,
+        valid: state.valid,
+        map: completed_map,
+        map_length: end_slot + 1
+    };
+}
+
+// Materialize all byte positions in a short bounded window. Each map entry
+// stores (UTF-16 units * 128 + snapped byte offset), both seven-bit values.
+fn coordinate_window(
+    view: [byte; up_to 70],
+    view_length: u64
+) -> (result: CoordinateWindow) {
+    let window: u64 = select(view_length <= view.len, view_length, view.len);
+    let empty_map: [u16; 71] = [0; 71];
+    iterate i over view carrying state: WindowState = WindowState {
+        bytes: 0,
+        units: 0,
+        last_bytes: 0,
+        last_units: 0,
+        failed: false,
+        valid: true,
+        map: empty_map
+    } {
+        let at_boundary: bool = i == state.bytes;
+        let active: bool = !state.failed && at_boundary && state.bytes < window;
+        let scalar: utf8_scalar.ScalarStep = utf8_scalar.step_scalar_generic(view, window, state.bytes);
+        let invalid: bool = active && !scalar.valid;
+        let consumed: bool = active && scalar.valid;
+        let next_bytes: u64 = select(consumed, scalar.next, state.bytes);
+        let width: u64 = select(consumed, scalar_width(scalar.scalar), 0);
+        let next_units: u64 = state.units + width;
+        let mapped_bytes: u64 = select(at_boundary, state.bytes, state.last_bytes);
+        let mapped_units: u64 = select(at_boundary, state.units, state.last_units);
+        let packed: u64 = mapped_units * 128 + mapped_bytes;
+        let updated_map: [u16; 71] = replace(state.map, i, packed as u16);
+        next state = WindowState {
+            bytes: next_bytes,
+            units: next_units,
+            last_bytes: select(consumed, state.bytes, state.last_bytes),
+            last_units: select(consumed, state.units, state.last_units),
+            failed: state.failed || invalid,
+            valid: state.valid && !invalid,
+            map: updated_map
+        };
+    }
+    let packed_end: u64 = state.units * 128 + state.bytes;
+    let completed_map: [u16; 71] = replace(state.map, window, packed_end as u16);
+    return CoordinateWindow {
+        valid: state.valid,
+        map: completed_map,
+        map_length: window + 1
+    };
+}
