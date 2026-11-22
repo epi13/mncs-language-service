@@ -100,6 +100,39 @@ fn imported_symbols_navigate_to_the_declaring_document() {
         .any(|hit| !hit.is_declaration && hit.uri.ends_with("study.mncs")));
 }
 
+#[test]
+fn declaration_identity_survives_a_profile_019_import() {
+    let root = imports_dir();
+    let caller_uri = uri("profile019_caller.mncs");
+    std::fs::write(
+        root.join("profile019.mncs"),
+        "mncs 0.19;\nmodule test.profile019;\n\
+         fn count(pages: [[byte; up_to 1]; up_to 2048]) -> (r: u64) { return pages.len; }\n\
+         fn first() -> (r: u64) { return 1; }",
+    )
+    .expect("write Profile 0.19 provider");
+    let caller = "mncs 0.18;\nmodule test.profile019_caller;\nuse test.profile019 as p;\n\
+                  fn parse_use() -> (r: u64) { return p.first(); }";
+    std::fs::write(root.join("profile019_caller.mncs"), caller).expect("write importer");
+    let svc = LanguageService::new(Some(root));
+    svc.discover_workspace().expect("discovery");
+
+    let analysis = svc.snapshot(&caller_uri).expect("importer analysis");
+    assert!(analysis.valid(), "{:?}", analysis.front_end.diagnostics);
+    let identity = "mncs:0.2:function:test.profile019_caller::parse_use";
+    let reply = svc
+        .describe_identity(&caller_uri, identity)
+        .expect("resolve declaration backed by a Profile 0.19 import");
+    let snapshot = reply.snapshot.expect("document snapshot");
+    assert!(snapshot.current);
+    assert_eq!(snapshot.uri, caller_uri);
+    let symbol = reply.subject.expect("resolved subject").summary;
+    assert_eq!(symbol.identity.as_deref(), Some(identity));
+    let span = symbol.range;
+    assert_eq!(span.start_byte, caller.find("fn parse_use").unwrap());
+    assert_eq!(span.end_byte, caller.len());
+}
+
 struct ArcSnapshot(std::sync::Arc<mncs_service_core::DocumentAnalysis>);
 
 impl ArcSnapshot {
